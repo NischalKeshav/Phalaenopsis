@@ -337,8 +337,11 @@ class Human {
         await this.key("End");
         for (const ch of " x") await this.key(ch, ch);
         await this.key("Tab");
-        this.note("EDITED a filled field", `${f.name}: "${f.before}" -> appended " x"`, t0);
-        this.edited = { name: f.name, after: f.before + " x" };
+        // Record what the field really holds now (End in a textarea only goes to
+        // the end of the line) and mark the element to find it again later.
+        const after = await evaluate(this.cdp, `(() => { const f = document.querySelector(${JSON.stringify(`[name="${f.name}"], #${f.name}`)}); if (!f) return null; f.setAttribute("data-phal-human-edited", "1"); return f.value; })()`, 5000).catch(() => null);
+        this.note("EDITED a filled field", `${f.name}: "${f.before}" -> "${after}"`, t0);
+        this.edited = { name: f.name, after, t: (Date.now() - t0) / 1000 };
       }
     } else {
       await this.key("Escape");
@@ -387,6 +390,12 @@ async function runOne(browser, scenario, mode, index) {
 
   const cdp = await CDP.open(browser.port);
   await cdp.send("Page.enable");
+  // A blocking alert/confirm would freeze every later evaluate: dismiss and log it.
+  const dialogs = [];
+  cdp.on("Page.javascriptDialogOpening", (p) => {
+    dialogs.push({ type: p.type, message: String(p.message).slice(0, 120) });
+    cdp.send("Page.handleJavaScriptDialog", { accept: p.type !== "beforeunload" }).catch(() => {});
+  });
   await cdp.send("Runtime.enable");
   await cdp.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
   await cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: bootScript() });
@@ -398,12 +407,14 @@ async function runOne(browser, scenario, mode, index) {
   const turns = [];
   const shots = [];
   let sessionId = null, results = [], events = [], interrupted = null, pending = scenario.prompt, last = null, error = null;
+  let lastSnapshotAt = 0;
   if (human) human.start(t0);
 
   try {
     for (let i = 0; i < MAX_TURNS; i++) {
       if ((Date.now() - t0) / 1000 > MAX_SECONDS) throw new Error(`time limit ${MAX_SECONDS}s`);
       await waitReady(cdp);
+      lastSnapshotAt = (Date.now() - t0) / 1000;
       const page = await pageCall(cdp, { type: "agentSnapshot" });
       if (!page) continue;
       const tm = Date.now();
@@ -411,7 +422,8 @@ async function runOne(browser, scenario, mode, index) {
       pending = null;
       sessionId = resp.session_id;
       last = resp;
-      const turn = { n: resp.turn, at_s: +((Date.now() - t0) / 1000).toFixed(1), model_s: +((Date.now() - tm) / 1000).toFixed(1), message: resp.message, actions: resp.actions.length, done: resp.done, background: resp.background || null };
+      const describe = (a) => `${a.op} ${a.selector}${a.value && a.value.literal !== undefined ? ` = ${JSON.stringify(a.value.literal).slice(0, 40)}` : ""}`;
+      const turn = { n: resp.turn, at_s: +((Date.now() - t0) / 1000).toFixed(1), model_s: +((Date.now() - tm) / 1000).toFixed(1), message: resp.message, actions: resp.actions.length, did: resp.actions.map(describe), done: resp.done, background: resp.background || null };
       turns.push(turn);
       log(`  ${scenario.id}/${mode} t${resp.turn} ${turn.model_s}s, ${resp.actions.length} actions${resp.done ? ", done" : ""}: ${resp.message.slice(0, 90)}`);
       if (resp.done) break;
@@ -462,10 +474,12 @@ async function runOne(browser, scenario, mode, index) {
   // rather than overwrite it. Judge that instead of the original exact-value check.
   if (human && human.edited) {
     const { name, after } = human.edited;
-    const now = await evaluate(cdp, `(() => { const e = document.querySelector(${JSON.stringify(`[name="${name}"], #${name}`)}); return e ? e.value : null; })()`, 5000).catch(() => null);
-    verdict.checks = verdict.checks.filter((c) => !(c.got && String(c.got).endsWith(" x")));
-    verdict.checks.push({ name: `person's edit to ${name} kept`, ok: now === after, got: now });
-    verdict.checks.push({ name: `person's edit to ${name} mentioned`, ok: /(you|person|user)\b.{0,60}(chang|edit|typ|add|modif)|(chang|edit|modif).{0,40}\b(by you|yourself)/i.test(last ? last.message : ""), got: (last ? last.message : "").slice(0, 80) });
+    // Only the same element counts: dialogs rebuilt per row reuse field names.
+    const now = await evaluate(cdp, `(() => { const e = document.querySelector("[data-phal-human-edited]"); return e ? e.value : "__gone__"; })()`, 5000).catch(() => "__gone__");
+    verdict.checks = verdict.checks.filter((c) => !(c.got && String(c.got).includes(" x")));
+    if (now !== "__gone__") verdict.checks.push({ name: `person's edit to ${name} kept`, ok: now === after, got: now });
+    // Only fair to expect a mention if the agent looked at the page after the edit.
+    if (human.edited.t < lastSnapshotAt) verdict.checks.push({ name: `person's edit to ${name} mentioned`, ok: /(you|your|person|user)\b.{0,60}(chang|edit|typ|add|modif|renam)|(chang|edit|modif).{0,40}\b(by you|yourself)/i.test(last ? last.message : ""), got: (last ? last.message : "").slice(0, 80) });
     verdict.pass = verdict.checks.every((c) => c.ok);
   }
   if (scenario.judge) {
@@ -493,6 +507,7 @@ async function runOne(browser, scenario, mode, index) {
     cost_usd: +sum("cost_usd").toFixed(6),
     usage,
     final_message: last ? last.message : null,
+    page_dialogs: dialogs,
     plan: last && last.plan ? last.plan.items.map((i) => `${i.status}: ${i.title}`) : [],
     human_actions: human ? human.actions : [],
     turns,

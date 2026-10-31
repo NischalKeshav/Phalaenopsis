@@ -242,6 +242,7 @@
       group.find((r) => label(r).startsWith(want) || want.startsWith(label(r)) && label(r).length > 0) ||
       group.find((r) => label(r).includes(want));
     if (!pick) throw new Error(`no radio option matching "${value}" (options: ${group.map((r) => PhalFP.fieldSig(r).label || r.value).join(", ")})`);
+    touch(pick);
     await point(pick.labels && pick.labels[0] ? pick.labels[0] : pick, `Choose ${JSON.stringify(PhalFP.fieldSig(pick).label || value)}`);
     await tap();
     if (!pick.checked) pick.click();
@@ -251,6 +252,8 @@
 
   // Set any kind of field to a value, choosing the right mechanism for its type.
   async function setField(el, value) {
+    touch(el);
+    el.dataset.phalSet = "1"; // see page_default in shared/fingerprint.js
     const tag = el.tagName.toLowerCase();
     if (tag === "select") return selectOption(el, value);
     if (el.type === "radio") return chooseRadio(el, value);
@@ -266,7 +269,14 @@
 
   // Show the virtual cursor on the element about to be used (see shared/cursor.js).
   const fieldName = (el) => (PhalFP.fieldSig(el).label || el.getAttribute("name") || el.id || "").replace(/\s*\*\s*$/, "").slice(0, 40);
+  // Elements the agent just acted on. Clicking a checkbox/radio from script makes
+  // the browser fire a change event that is marked trusted, so trust alone would
+  // mistake the agent's own clicks for the person's edits.
+  const agentTouched = new WeakMap();
+  const touch = (el) => { if (el) agentTouched.set(el, Date.now()); };
+
   async function point(el, text) {
+    touch(el);
     if (typeof PhalCursor === "undefined" || !el) return;
     el.scrollIntoView({ block: "center", behavior: "instant" });
     await PhalCursor.moveTo(el, text, pace.cursor || 1);
@@ -499,6 +509,11 @@
   const userEdits = new Map();
   const noteUserEdit = (e) => {
     if (!e.isTrusted) return;
+    // Only checkbox/radio clicks from script produce trusted change events;
+    // typed text from the agent never does, so real keystrokes always count.
+    const toggle = e.target.type === "checkbox" || e.target.type === "radio";
+    const touchedAt = agentTouched.get(e.target);
+    if (toggle && touchedAt && Date.now() - touchedAt < 2500) return;
     const el = e.target;
     if (!(el instanceof Element) || !el.matches("input, select, textarea")) return;
     if (el.type === "password") return;

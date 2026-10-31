@@ -250,6 +250,9 @@ var PhalFP = (() => {
       const f = fieldSig(el);
       f.value = el.type === "checkbox" ? String(el.checked) : String(el.value || "").slice(0, 300);
       f.options = el.tagName.toLowerCase() === "select" ? [...el.options].slice(0, 120).map((o) => ({ value: o.value, text: o.text.trim() })) : [];
+      // The page preselected this option itself (selected="selected" in the HTML) and
+      // nobody has changed it: it looks filled but is not an answer.
+      f.page_default = el.tagName.toLowerCase() === "select" && el.selectedIndex > 0 && el.options[el.selectedIndex].defaultSelected && !el.dataset.phalSet;
       f.required = isRequired(el, f.label);
       f.invalid = isInvalid(el);
       fields.push(f);

@@ -120,8 +120,14 @@ impl LlmClient {
         // OpenAI's mini is fastest with its own default.
         let fast_reasoning_effort = env_any(&["LLM_FAST_REASONING_EFFORT", "OPENAI_FAST_REASONING_EFFORT"])
             .or_else(|| (provider == Provider::OpenRouter).then(|| "low".into()));
+        // A hung upstream request must not stall the agent for minutes.
+        let http = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(90))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         Some(Self {
-            http: reqwest::Client::new(),
+            http,
             key,
             provider,
             model,
@@ -182,7 +188,16 @@ impl LlmClient {
             if self.provider == Provider::OpenRouter {
                 req = req.header("X-Title", "Phalaenopsis");
             }
-            let resp = req.send().await.with_context(|| format!("{provider} request failed"))?;
+            let resp = match req.send().await {
+                Ok(r) => r,
+                // Timeouts and dropped connections are transient: retry like a 5xx.
+                Err(e) if (e.is_timeout() || e.is_connect() || e.is_request()) && attempt < MAX_ATTEMPTS => {
+                    tracing::info!("{provider} request failed ({e}), retrying (attempt {attempt}/{MAX_ATTEMPTS})");
+                    tokio::time::sleep(std::time::Duration::from_millis(500 * attempt as u64)).await;
+                    continue;
+                }
+                Err(e) => return Err(anyhow::Error::new(e).context(format!("{provider} request failed"))),
+            };
             let status = resp.status();
             let header_wait = resp
                 .headers()
@@ -191,7 +206,16 @@ impl LlmClient {
                 .and_then(|v| v.parse::<f64>().ok())
                 .map(|ms| ms / 1000.0)
                 .or_else(|| resp.headers().get("retry-after").and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<f64>().ok()));
-            let text = resp.text().await.with_context(|| format!("{provider} response unreadable"))?;
+            let text = match resp.text().await {
+                Ok(t) => t,
+                // The body can stall after the headers arrive; retry that too.
+                Err(e) if attempt < MAX_ATTEMPTS => {
+                    tracing::info!("{provider} response body failed ({e}), retrying (attempt {attempt}/{MAX_ATTEMPTS})");
+                    tokio::time::sleep(std::time::Duration::from_millis(500 * attempt as u64)).await;
+                    continue;
+                }
+                Err(e) => return Err(anyhow::Error::new(e).context(format!("{provider} response unreadable"))),
+            };
             if status.is_success() {
                 break text;
             }

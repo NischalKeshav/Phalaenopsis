@@ -130,13 +130,15 @@ export const SCENARIOS = [
     prompt: "Fill in all my classes and grades from my transcript.",
     verify: V + String.raw`
       const rows = (window.__courseRows || []).map((r) => r.join(" | "));
+      // "( x)?": in busy runs the simulated person may append " x" to a field;
+      // keeping the person's edit is correct, so it still counts.
       const want = [
-        /English \| 9th \| Honors \| English 9 Honors \| A/,
-        /Mathematics \| 9th \| Regular \| Algebra II \| A-/,
-        /Science \| 9th \| Honors \| Biology Honors \| A/,
-        /World Language \| 9th \| Regular \| Spanish II \| B\+/,
-        /Computer Science \| 10th \| AP \| AP Computer Science Principles \| .*\| exam: Yes/,
-        /Mathematics \| 10th \| Honors \| Precalculus Honors \| A/,
+        /English \| 9th \| Honors \| English 9 Honors( x)? \| A/,
+        /Mathematics \| 9th \| Regular \| Algebra II( x)? \| A-/,
+        /Science \| 9th \| Honors \| Biology Honors( x)? \| A/,
+        /World Language \| 9th \| Regular \| Spanish II( x)? \| B\+/,
+        /Computer Science \| 10th \| AP \| AP Computer Science Principles( x)? \| .*\| exam: Yes/,
+        /Mathematics \| 10th \| Honors \| Precalculus Honors( x)? \| A/,
       ];
       const checks = want.map((re) => check(re.source.split(" \\| ")[3] || re.source, rows.some((r) => re.test(r)), rows.find((r) => re.test(r)) || "missing"));
       checks.push(check("no duplicate rows", new Set(rows).size === rows.length && rows.length === 6, rows.length + " rows"));

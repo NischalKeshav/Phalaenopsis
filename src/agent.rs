@@ -120,6 +120,8 @@ pub struct AgentSession {
     pub idle_turns: usize,
     /// Fields the person edited during this session (selector -> latest edit).
     pub user_edits: BTreeMap<String, UserEdit>,
+    /// Micro-turn when a question for the user was last checked against the documents.
+    pub last_user_question_check: Option<usize>,
 }
 
 /// Something the page did while actions ran, as perceived by the executor.
@@ -321,6 +323,8 @@ interrupted (set when the page reacted unexpectedly and your remaining actions w
 Reply with: message (one short sentence for the user), actions, item_updates, delegate. \
 Actions: fill (text/textarea/date/number; value = exact text), select (native <select> or a radio-group; value = the option's visible text), \
 check (checkbox; value \"true\"/\"false\"), click (buttons/links; value \"\"), waitFor (value \"\"). Use only selectors listed in the page. \
+A select with page_default=true still shows the page's own preset (e.g. a state preselected by the site): it is not an answer. \
+If the plan has a value for that field, set it. \
 radio-group fields are sets of radio buttons: select the option text (e.g. \"10th\", \"Yes\"). Map plan values onto the options shown (e.g. 'Grade 10' -> '10th'). \
 Work through plan items in order. Before entering an item, check the page text: if it is already listed (e.g. a table row with that class), \
 mark it done and move on; never enter an item twice. Mark an item doing when you start it, done once it appears on the page, \
@@ -338,6 +342,7 @@ stop and ask the user, leaving that item unsaved. \
 delegate: a short question for the background model, or \"\" (the usual case). Delegate only when a required value is absent from the plan and notes \
 (e.g. whether an exam was taken), when no option fits a plan value, or when you are stuck; keep acting on other items meanwhile. \
 Ask the user only if the background model says the documents do not contain the answer. \
+If you notice a value you entered earlier is wrong (it does not match the plan or documents), fix it; never leave your own mistake in place. \
 person_edited lists fields the person changed themselves while you worked. Their edits win: never overwrite them unless the request says to, \
 and mention them in your final message (e.g. 'You changed Username to ...; I left it'). \
 Never invent data. Do not click the final submit of an application, pay, sign, or delete anything; saving a row or dialog is fine. \
@@ -483,6 +488,9 @@ fn page_view(page: &AgentPage) -> serde_json::Value {
             }
             if f.required && f.value.trim().is_empty() {
                 v["missing"] = json!(true);
+            }
+            if f.page_default {
+                v["page_default"] = json!(true);
             }
             if !f.options.is_empty() {
                 // Options are matched by visible text, so send text only unless the value differs meaningfully.
@@ -713,6 +721,7 @@ impl MemoryController {
                     last_delegate_turn: None,
                     idle_turns: 0,
                     user_edits: BTreeMap::new(),
+            last_user_question_check: None,
                 }
             }
         };
@@ -835,11 +844,10 @@ The background model has been asked for help; fix what new_text and missing/erro
             self.background.lock().unwrap().entry(session.id.clone()).or_default().usage.interaction.add(&usage);
             raw = serde_json::from_value(reply)?;
             session.notes_seen = bg.notes.len();
-            if !raw.item_updates.is_empty() {
-                if let Some(plan) = self.background.lock().unwrap().get_mut(&session.id).and_then(|b| b.plan.as_mut()) {
+            if !raw.item_updates.is_empty()
+                && let Some(plan) = self.background.lock().unwrap().get_mut(&session.id).and_then(|b| b.plan.as_mut()) {
                     plan.apply(&raw.item_updates);
                 }
-            }
             let turn_no = session.turns.len();
             let recently = session.last_delegate_turn.is_some_and(|t| turn_no < t + DELEGATE_EVERY);
             if !raw.delegate.trim().is_empty() && (!recently || stuck_warning.is_some()) {
@@ -848,6 +856,15 @@ The background model has been asked for help; fix what new_text and missing/erro
                 session.last_delegate_turn = Some(turn_no);
             }
             let busy = self.bg(&session.id).running.is_some();
+            // Values before the plan exists are guesses (e.g. "Me", "me@example.com").
+            // Navigation (Add New, Next) may go ahead; anything that types or picks
+            // a value waits for the background plan, then the turn is asked again.
+            let sets_values = raw.actions.iter().any(|a| matches!(a.op.as_str(), "fill" | "select" | "check"));
+            let bg_now = self.bg(&session.id);
+            if sets_values && bg_now.plan.is_none() && !bg_now.planning_failed && busy && attempt <= 2 {
+                self.await_background(&session.id).await;
+                continue;
+            }
             // Finish guard: "finished" while plan items are still open is usually a
             // false completion. Make the model look once more before accepting it.
             let unfinished = self.unfinished_items(&session.id);
@@ -857,6 +874,21 @@ The background model has been asked for help; fix what new_text and missing/erro
 If it is on the page, mark it done; if it is missing or wrong, enter it now; if it cannot be entered, mark it skipped with a note.",
                     unfinished.join("; ")
                 ));
+                continue;
+            }
+            // Before bothering the user, check the documents: the fast model only sees
+            // the plan, so "I need X from you" often means "X was not in the plan".
+            let recently_checked = session.last_user_question_check.is_some_and(|t| session.turns.len() < t + 5);
+            if raw.actions.is_empty() && raw.state == "need_user" && !busy && !recently_checked && attempt <= 2 {
+                session.last_user_question_check = Some(session.turns.len());
+                let q = format!(
+                    "Before asking the user, check the documents. The interaction layer wants to ask: \"{}\". \
+If the documents, profile or request contain the answer, give the exact values to enter; otherwise say plainly that they do not.",
+                    raw.message
+                );
+                let ctx = self.consult_context(&session, &docs, &profile, &req.page);
+                self.spawn_background(&session.id, Some(q), ctx);
+                self.await_background(&session.id).await;
                 continue;
             }
             if raw.actions.is_empty() && attempt == 1 && (busy || raw.state == "working") {
@@ -882,6 +914,11 @@ If it is on the page, mark it done; if it is missing or wrong, enter it now; if 
         let mut rejected = Vec::new();
         for a in raw.actions {
             let desc = format!("{} {}", a.op, a.selector);
+            // The person's edits win: never type over a field they changed themselves.
+            if matches!(a.op.as_str(), "fill" | "select" | "check") && session.user_edits.contains_key(&a.selector) {
+                rejected.push(format!("{desc}: the person edited this field themselves; leave it as they set it"));
+                continue;
+            }
             // waitFor may target an element that does not exist yet.
             if a.op != "waitFor" && !allowed.contains(&a.selector) {
                 rejected.push(format!("{desc}: selector never seen on this page; use selectors from the page"));
@@ -900,6 +937,34 @@ If it is on the page, mark it done; if it is missing or wrong, enter it now; if 
         session.idle_turns = if idle && raw.state == "working" { session.idle_turns + 1 } else { 0 };
         let stalled = session.idle_turns >= MAX_IDLE_TURNS;
         let mut message = raw.message.clone();
+        // The person's own edits must always be reported, even if the model forgot.
+        if idle && raw.state != "working" {
+            let lower = message.to_lowercase();
+            let unmentioned: Vec<String> = session
+                .user_edits
+                .values()
+                .filter(|e| {
+                    let label = e.label.trim().trim_end_matches('*').trim().to_lowercase();
+                    !(lower.contains(&e.value.to_lowercase()) || (!label.is_empty() && lower.contains(&label)))
+                })
+                // Only claim "I left your edit" if the page still shows it.
+                .filter(|e| {
+                    req.page.fields.iter().find(|f| f.sig.selector == e.selector).is_none_or(|f| f.value == e.value || e.value == "true" || e.value == "false")
+                })
+                .map(|e| {
+                    let label = e.label.trim().trim_end_matches('*').trim();
+                    let name = if label.is_empty() { e.selector.as_str() } else { label };
+                    match e.value.as_str() {
+                        "true" => format!("selected \"{name}\""),
+                        "false" => format!("cleared \"{name}\""),
+                        v => format!("set {name} to \"{v}\""),
+                    }
+                })
+                .collect();
+            if !unmentioned.is_empty() {
+                message = format!("{message} Note: while I worked you {}; I left your edits.", unmentioned.join(" and "));
+            }
+        }
         let still_open = self.unfinished_items(&session.id);
         if idle && raw.state == "finished" && !still_open.is_empty() {
             message = format!("{message} Not confirmed on the page: {}.", still_open.join(", "));
@@ -1179,6 +1244,7 @@ mod tests {
             last_delegate_turn: None,
             idle_turns: 0,
             user_edits: BTreeMap::new(),
+            last_user_question_check: None,
         };
         c.put_session(session);
         let saved = c.agent_finish("s1", vec![ok()]).await.unwrap();

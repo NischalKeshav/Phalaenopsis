@@ -206,6 +206,9 @@ pub struct AgentField {
     /// The page marks this field as having an error.
     #[serde(default)]
     pub invalid: bool,
+    /// A select still showing the option the page preselected; nobody chose it.
+    #[serde(default)]
+    pub page_default: bool,
 }
 
 /// A clickable element (button, link) the agent may use.
