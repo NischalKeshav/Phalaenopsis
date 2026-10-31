@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "skills": {
+    "anti-slop": {
+      "source": "smithery.ai",
+      "sourceUrl": "https://smithery.ai/skills/rand/anti-slop",
+      "sourceType": "well-known",
+      "computedHash": "0800335799f745c475640bec46c3c57a80ef5025574035d129ec2d5c1cb6847f",
+      "wellKnownDigest": "sha256:29d6e5f02e8be4ec62389ddf37b8a567248a119fd037d26d13d3a0cd4faf6e91"
+    }
+  }
+}

@@ -1,0 +1,90 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Self-reported coursework (MIT-style)</title>
+  <style>
+    body { font: 14px system-ui, sans-serif; max-width: 1000px; margin: 20px auto; color: #1e293b; }
+    h1 { font-size: 36px; margin: 0 0 10px; }
+    table.list { width: 100%; border-collapse: collapse; margin-top: 10px; }
+    table.list th { background: #d9d9d9; text-align: left; padding: 4px 6px; }
+    table.list td { padding: 4px 6px; border-bottom: 1px solid #ddd; }
+    #overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.45); }
+    .popup { background: #ececec; width: 650px; margin: 30px auto; border: 1px solid #999; }
+    .popup .hdr { background: #d6d6d6; font-weight: 700; padding: 6px 10px; display: flex; justify-content: space-between; }
+    .popup .body { padding: 10px 12px; position: relative; }
+    .row { display: grid; grid-template-columns: 150px 1fr; padding: 5px 4px; align-items: start; }
+    .row.bad { background: #e6b8b7; }
+    .foot { padding: 10px 12px; border-top: 1px solid #ccc; }
+    .foot button { padding: 6px 14px; }
+    /* Plain div, no role/class hints: like the portal's message box. */
+    #msg { display: none; position: absolute; left: 120px; top: 200px; width: 400px; background: #fff; border: 1px solid #aaa; padding: 40px 10px; text-align: center; color: #c00; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <h1>Self-reported coursework</h1>
+  <p>Report all classes you have taken or will take in high school or for high school credit.</p>
+  <table class="list">
+    <thead><tr><th>Subject Category</th><th>Year Taken</th><th>Level</th><th>Class Name</th><th>Grade Received</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <a href="#" onclick="openForm(); return false;">Add New</a>
+
+  <div id="overlay">
+    <div class="popup">
+      <div class="hdr"><span>Self-Reported Course Work</span><a href="#" onclick="closeForm(); return false;">✕</a></div>
+      <div class="body" id="formBody"></div>
+      <div class="foot"><button type="button" onclick="save()">Save</button> <button type="button" onclick="closeForm()">Cancel</button></div>
+    </div>
+  </div>
+
+  <script>
+    // Slate-style generated names.
+    const N = { subj: "form_aa4ac104-d396-4c04-b2fe-7a1", year: "form_dcf35bde-c7c8-4", level: "form_4d4ec772-76e9-4", cls: "form_e74e7feb-75dd-461", grade: "form_41cbe0dc-dd51-482", exam: "form_9b7d0a11-5c2e-4" };
+    const SUBJECTS = ["English", "Mathematics", "Science", "Social Studies", "World Language", "Arts", "Computer Science", "Other"];
+    const LEVELS = ["Regular", "Honors", "AP", "IB", "Dual Enrollment"];
+    const rows = [];
+    const radios = (name, labels) => labels.map((l, i) => `<div><input type="radio" id="${name}_${i}" name="${name}" value="${i + 1}"> <label for="${name}_${i}">${l}</label></div>`).join("");
+    function openForm() {
+      document.getElementById("formBody").innerHTML = `
+        <div>Need some help completing this section? <a href="#">Find more details on our website</a>.</div>
+        <div class="row" id="r_subj"><div>Subject category *</div><div><select name="${N.subj}"><option value=""></option>${SUBJECTS.map((s) => `<option>${s}</option>`).join("")}</select></div></div>
+        <div class="row" id="r_year"><div>Year taken *</div><div>${radios(N.year, ["9th", "10th", "11th", "12th"])}</div></div>
+        <div class="row" id="r_level"><div>Level *</div><div><select name="${N.level}" onchange="toggleExam()"><option value=""></option>${LEVELS.map((s) => `<option>${s}</option>`).join("")}</select></div></div>
+        <div class="row" id="r_cls"><div>Class name *</div><div><input type="text" name="${N.cls}" size="40"></div></div>
+        <div class="row"><div>Grade received<br><i>leave blank if in progress</i></div><div><input type="text" name="${N.grade}" size="30"></div></div>
+        <div class="row" id="r_exam" style="display:none"><div>Have you taken the corresponding exam offered with this course? *<br><i>For exams you have not yet taken but plan to in the spring, please select no.</i></div><div>${radios(N.exam, ["Yes", "No"])}</div></div>
+        <div id="msg"></div>`;
+      document.getElementById("overlay").style.display = "block";
+    }
+    function toggleExam() {
+      const lvl = document.querySelector(`select[name="${N.level}"]`).value;
+      document.getElementById("r_exam").style.display = lvl === "AP" || lvl === "IB" ? "" : "none";
+    }
+    function closeForm() { document.getElementById("overlay").style.display = "none"; }
+    const val = (n) => { const e = document.querySelector(`[name="${n}"]:checked`) || document.querySelector(`select[name="${n}"], input[type=text][name="${n}"]`); return e && (e.type === "radio" ? e.nextElementSibling.textContent : e.value); };
+    function save() {
+      document.querySelectorAll(".row.bad").forEach((r) => r.classList.remove("bad"));
+      const missing = [];
+      const need = [["r_subj", N.subj], ["r_year", N.year], ["r_level", N.level], ["r_cls", N.cls]];
+      if (document.getElementById("r_exam").style.display !== "none") need.push(["r_exam", N.exam]);
+      for (const [row, n] of need) {
+        const isRadio = !!document.querySelector(`input[type=radio][name="${n}"]`);
+        const v = isRadio ? document.querySelector(`[name="${n}"]:checked`) : val(n);
+        if (!v) { missing.push(row); document.getElementById(row).classList.add("bad"); }
+      }
+      const msg = document.getElementById("msg");
+      if (missing.length) {
+        msg.textContent = `${missing.length} required field${missing.length > 1 ? "s were" : " was"} not completed.`;
+        msg.style.display = "block";
+        setTimeout(() => (msg.style.display = "none"), 2500);
+        return;
+      }
+      rows.push([val(N.subj), val(N.year), val(N.level), val(N.cls), val(N.grade) || "", document.getElementById("r_exam").style.display === "none" ? "" : "exam: " + val(N.exam)]);
+      document.getElementById("rows").innerHTML = rows.map((r) => `<tr>${r.slice(0, 5).map((c) => `<td>${c}</td>`).join("")}</tr>`).join("");
+      closeForm();
+    }
+    window.__courseRows = rows;
+  </script>
+</body>
+</html>

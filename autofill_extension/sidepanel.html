@@ -1,0 +1,117 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Phalaenopsis</title>
+  <link rel="stylesheet" href="sidepanel.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand"><span id="health" class="dot" title="backend"></span> Phalaenopsis</div>
+    <select id="mode" title="What happens when a known page loads">
+      <option value="off">Off</option>
+      <option value="replay">Replay on click</option>
+      <option value="auto">Auto-replay</option>
+      <option value="record">Record me</option>
+    </select>
+  </header>
+
+  <div id="pageCard" class="page-card">
+    <span id="matchBadge" class="badge"></span>
+    <div class="page-text">
+      <div id="pageTitle" class="page-title">No page yet</div>
+      <div id="pageMeta" class="muted small"></div>
+    </div>
+  </div>
+
+  <nav class="tabs">
+    <button data-tab="agent" class="active">Agent</button>
+    <button data-tab="context">Context <span id="ctxCount" class="count"></span></button>
+    <button data-tab="memory">Memory <span id="scriptCount" class="count"></span></button>
+    <button data-tab="profile">Profile</button>
+  </nav>
+
+  <main>
+    <!-- Agent chat -->
+    <section id="tab-agent" class="tab active">
+      <div id="chat" class="chat">
+        <div class="empty" id="chatEmpty">
+          <p><strong>Tell it what to fill.</strong></p>
+          <p class="muted">Attach a transcript or resume with the paperclip, then ask something like:</p>
+          <button class="suggestion">Fill in all my classes and grades from my transcript</button>
+          <button class="suggestion">Fill this page using my profile</button>
+          <p class="muted small">What works gets saved to memory, so next time this page fills without the model.</p>
+        </div>
+      </div>
+      <div id="error" class="error"></div>
+      <div class="composer">
+        <div id="chips" class="chips"></div>
+        <textarea id="prompt" rows="3" placeholder="What should I fill on this page?"></textarea>
+        <div class="composer-row">
+          <label class="icon-btn" title="Attach a document (PDF, image, text)">
+            📎<input id="attach" type="file" accept=".pdf,.png,.jpg,.jpeg,.webp,.gif,.txt,.md,.csv,.tsv,.json" multiple hidden>
+          </label>
+          <select id="attachScope" title="Where attached documents apply">
+            <option value="host">This site</option>
+            <option value="*">All sites</option>
+          </select>
+          <select id="pace" title="How long to wait for the page between actions">
+            <option value="fast">Fast</option>
+            <option value="normal">Normal</option>
+            <option value="careful">Careful</option>
+          </select>
+          <span class="spacer"></span>
+          <button id="newChat" title="Start a new conversation">New chat</button>
+          <button id="stop" class="secondary" hidden>Stop</button>
+          <button id="send" class="primary">Send</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Context documents -->
+    <section id="tab-context" class="tab">
+      <p class="muted small">Documents the agent can read when filling forms. PDFs and images are transcribed once by the model; the text is stored in your local graph.</p>
+      <div class="row">
+        <label class="button-like">Upload files<input id="ctxFile" type="file" accept=".pdf,.png,.jpg,.jpeg,.webp,.gif,.txt,.md,.csv,.tsv,.json" multiple hidden></label>
+        <select id="ctxScope">
+          <option value="host">This site</option>
+          <option value="*">All sites</option>
+        </select>
+      </div>
+      <details class="paste">
+        <summary>Paste text instead</summary>
+        <input id="pasteName" type="text" placeholder="Name, e.g. Coursework notes">
+        <textarea id="pasteText" rows="6" placeholder="Paste text the agent should know"></textarea>
+        <button id="pasteSave">Save</button>
+      </details>
+      <ul id="docs" class="list"></ul>
+    </section>
+
+    <!-- Memory: scripts linked to this page node -->
+    <section id="tab-memory" class="tab">
+      <div class="row between">
+        <span class="muted small">Scripts this page's node links to, best first.</span>
+        <span>
+          <button id="rescan">Re-scan</button>
+          <button id="learn" title="Save actions recorded in Record mode">Save recording</button>
+        </span>
+      </div>
+      <ul id="scripts" class="list"></ul>
+      <div id="next" class="muted small"></div>
+    </section>
+
+    <!-- Profile and settings -->
+    <section id="tab-profile" class="tab">
+      <p class="muted small">Short facts used to fill forms. Saved scripts refer to these keys, so updating a value updates every script.</p>
+      <table id="profile"></table>
+      <div class="row"><button id="addFact">+ Add</button><button id="saveProfile" class="primary">Save profile</button></div>
+      <h3>Settings</h3>
+      <label class="stack">Backend URL <input id="backendUrl" type="text"></label>
+      <button id="saveSettings">Save settings</button>
+    </section>
+  </main>
+
+  <script src="sidepanel.js"></script>
+</body>
+</html>

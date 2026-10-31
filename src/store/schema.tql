@@ -1,0 +1,46 @@
+define
+  attribute id, value string;
+  attribute host, value string;
+  attribute url_pattern, value string;
+  attribute fingerprint, value string;
+  attribute title, value string;
+  attribute fields_json, value string;
+  attribute seen_count, value integer;
+  attribute created_at, value datetime;
+  attribute name, value string;
+  attribute kind, value string;
+  attribute body, value string;
+  attribute origin, value string;
+  attribute successes, value integer;
+  attribute failures, value integer;
+  attribute last_run, value datetime;
+  attribute via_id, value string;
+  attribute hits, value integer;
+  attribute fact_key, value string;
+  attribute fact_value, value string;
+  attribute mime, value string;
+  attribute scope, value string;
+  attribute doc_text, value string;
+
+  entity observation,
+    owns id @key, owns host, owns url_pattern, owns fingerprint, owns title,
+    owns fields_json, owns seen_count, owns created_at,
+    plays applies:page, plays transition:source, plays transition:target;
+
+  entity tool_script,
+    owns id @key, owns name, owns kind, owns body, owns origin, owns created_at,
+    plays applies:script;
+
+  entity profile_fact,
+    owns fact_key @key, owns fact_value;
+
+  entity context_doc,
+    owns id @key, owns name, owns mime, owns scope, owns doc_text, owns created_at;
+
+  relation applies,
+    relates page, relates script,
+    owns successes, owns failures, owns last_run;
+
+  relation transition,
+    relates source, relates target,
+    owns via_id, owns hits;

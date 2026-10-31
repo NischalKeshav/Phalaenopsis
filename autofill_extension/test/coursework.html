@@ -1,0 +1,90 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Self-reported coursework</title>
+  <style>
+    body { font: 15px system-ui, sans-serif; max-width: 1000px; margin: 20px auto; color: #1e293b; }
+    h1 { font-size: 40px; margin: 0 0 12px; }
+    .bar { background: #c8c8c8; font-weight: 600; padding: 4px 6px; margin-top: 16px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+    th { background: #d9d9d9; text-align: left; padding: 4px 6px; }
+    td { padding: 4px 6px; border-bottom: 1px solid #ddd; }
+    #dialog { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.35); }
+    #dialog .box { background: #fff; width: 420px; margin: 80px auto; padding: 16px 20px; border-radius: 6px; }
+    #dialog label { display: block; margin: 10px 0 3px; font-weight: 600; }
+    #dialog select, #dialog input { width: 100%; padding: 5px; box-sizing: border-box; }
+    .err { color: #b91c1c; font-size: 13px; min-height: 1em; }
+    .btns { margin-top: 14px; display: flex; gap: 8px; }
+  </style>
+</head>
+<body>
+  <h1>Self-reported coursework</h1>
+  <p>In an attempt to gain a better understanding of your secondary school studies, we ask that you complete the following page.</p>
+  <div class="bar">Classes</div>
+  <p><strong>Report all classes you have taken or will take in high school or for high school credit.</strong></p>
+  <table>
+    <thead><tr><th>Subject Category</th><th>Year Taken</th><th>Level</th><th>Class Name</th><th>Grade Received</th><th></th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <a href="#" id="addNewLink" onclick="openDialog(); return false;">Add New</a>
+
+  <!-- Dialog markup is created on demand, like many portals do. -->
+  <div id="dialog"></div>
+
+  <script>
+    const SUBJECTS = ["English", "Mathematics", "Science", "Social Studies", "World Language", "Arts", "Computer Science", "Other"];
+    const YEARS = ["9th Grade", "10th Grade", "11th Grade", "12th Grade"];
+    const LEVELS = ["Regular", "Honors", "AP", "IB", "Dual Enrollment"];
+    const opts = (list) => '<option value="">Select…</option>' + list.map((v, i) => `<option value="${i + 1}">${v}</option>`).join("");
+    const rows = [];
+    // ?slow=1 behaves like a real portal: the dialog arrives after a server round trip,
+    // Year Taken options load only after a subject is chosen, and Save is asynchronous.
+    const SLOW = new URLSearchParams(location.search).has("slow");
+    // Real server round trip; falls back to a timer if the delay server is absent.
+    const roundTrip = (ms) => fetch(`http://127.0.0.1:7788/sleep?ms=${ms}`).catch(() => new Promise((r) => setTimeout(r, ms)));
+    function openDialog() {
+      if (SLOW) return roundTrip(900).then(openDialogNow);
+      openDialogNow();
+    }
+    function openDialogNow() {
+      const d = document.getElementById("dialog");
+      d.innerHTML = `<div class="box" role="dialog" aria-label="Add class">
+        <h3>Add class</h3>
+        <label for="subject">Subject Category</label><select id="subject" name="subject">${opts(SUBJECTS)}</select>
+        <label for="year">Year Taken</label><select id="year" name="year">${SLOW ? '<option value="">Select…</option>' : opts(YEARS)}</select>
+        <label for="level">Level</label><select id="level" name="level">${opts(LEVELS)}</select>
+        <label for="className">Class Name</label><input id="className" name="className" type="text">
+        <label for="grade">Grade Received</label><input id="grade" name="grade" type="text" placeholder="e.g. A, 95, In progress">
+        <div class="err" id="err"></div>
+        <div class="btns"><button type="button" onclick="saveRow()">Save</button><button type="button" onclick="closeDialog()">Cancel</button></div>
+      </div>`;
+      d.style.display = "block";
+      if (SLOW) {
+        document.getElementById("subject").addEventListener("change", () => {
+          const y = document.getElementById("year");
+          y.innerHTML = '<option value="">Loading…</option>';
+          roundTrip(700).then(() => { y.innerHTML = opts(YEARS); });
+        });
+      }
+    }
+    function closeDialog() { const d = document.getElementById("dialog"); d.style.display = "none"; d.innerHTML = ""; }
+    function saveRow() {
+      if (SLOW) return roundTrip(600).then(saveRowNow);
+      saveRowNow();
+    }
+    function saveRowNow() {
+      const v = (id) => document.getElementById(id);
+      const s = v("subject"), y = v("year"), l = v("level");
+      if (!s.value || !y.value || !l.value || !v("className").value.trim()) { v("err").textContent = "Subject, year, level and class name are required."; return; }
+      rows.push([s.options[s.selectedIndex].text, y.options[y.selectedIndex].text, l.options[l.selectedIndex].text, v("className").value.trim(), v("grade").value.trim()]);
+      render(); closeDialog();
+    }
+    function removeRow(i) { rows.splice(i, 1); render(); }
+    function render() {
+      document.getElementById("rows").innerHTML = rows.map((r, i) => `<tr>${r.map((c) => `<td>${c.replace(/</g, "&lt;")}</td>`).join("")}<td><a href="#" onclick="removeRow(${i}); return false;">Remove</a></td></tr>`).join("");
+    }
+    window.__courseRows = rows;
+  </script>
+</body>
+</html>

@@ -1,0 +1,54 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Test Application · Profile</title>
+  <style>
+    body { font: 15px system-ui, sans-serif; max-width: 560px; margin: 40px auto; }
+    label { display: block; margin: 12px 0 4px; font-weight: 600; }
+    input, select, textarea { width: 100%; padding: 6px; box-sizing: border-box; }
+    .inline { display: flex; gap: 8px; align-items: center; }
+    .inline label { margin: 0; font-weight: normal; }
+    button { margin-top: 16px; padding: 8px 16px; }
+  </style>
+</head>
+<body>
+  <h1>Applicant profile</h1>
+  <form id="profileForm" action="form2.html" method="get">
+    <label for="firstName">First name</label>
+    <input id="firstName" name="firstName" type="text" autocomplete="given-name">
+
+    <label for="lastName">Last name</label>
+    <input id="lastName" name="lastName" type="text" autocomplete="family-name">
+
+    <label for="email">Email address</label>
+    <input id="email" name="email" type="email" autocomplete="email">
+
+    <label for="phone">Phone</label>
+    <input id="phone" name="phone" type="tel" autocomplete="tel">
+
+    <label for="dob">Date of birth</label>
+    <input id="dob" name="dob" type="date" autocomplete="bday">
+
+    <label for="country">Country of citizenship</label>
+    <select id="country" name="country" autocomplete="country-name">
+      <option value="">Select…</option>
+      <option value="US">United States</option>
+      <option value="IN">India</option>
+      <option value="CA">Canada</option>
+      <option value="GB">United Kingdom</option>
+    </select>
+
+    <label for="address">Street address</label>
+    <textarea id="address" name="address" rows="2" autocomplete="street-address"></textarea>
+
+    <div class="inline" style="margin-top:12px">
+      <input id="firstGen" name="firstGen" type="checkbox">
+      <label for="firstGen">I am a first-generation college student</label>
+    </div>
+
+    <button id="next" type="submit">Save and continue</button>
+  </form>
+  <p><small>Phalaenopsis test page 1 of 2. Submitting goes to form2.html.</small></p>
+</body>
+</html>

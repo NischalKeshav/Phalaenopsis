@@ -1,0 +1,32 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Test Application · Family</title>
+  <style>
+    body { font: 15px system-ui, sans-serif; max-width: 560px; margin: 40px auto; }
+    label { display: block; margin: 12px 0 4px; font-weight: 600; }
+    input, select { width: 100%; padding: 6px; box-sizing: border-box; }
+    button { margin-top: 16px; padding: 8px 16px; }
+  </style>
+</head>
+<body>
+  <h1>Family information</h1>
+  <form id="familyForm" action="form.html" method="get">
+    <label for="parent1Name">Parent / guardian 1 name</label>
+    <input id="parent1Name" name="parent1Name" type="text">
+
+    <label for="parent1Occupation">Parent / guardian 1 occupation</label>
+    <input id="parent1Occupation" name="parent1Occupation" type="text">
+
+    <label for="householdSize">Household size</label>
+    <input id="householdSize" name="householdSize" type="number" min="1">
+
+    <label for="highSchool">High school</label>
+    <input id="highSchool" name="highSchool" type="text">
+
+    <button id="back" type="submit">Back to profile</button>
+  </form>
+  <p><small>Phalaenopsis test page 2 of 2.</small></p>
+</body>
+</html>
