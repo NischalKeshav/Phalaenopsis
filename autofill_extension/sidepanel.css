@@ -81,3 +81,19 @@ h3 { font-size: 13px; margin: 18px 0 4px; }
 .plan-items .st-doing { font-weight: 600; }
 .plan-items .st-skipped { color: var(--muted); text-decoration: line-through; }
 .interrupt { margin-top: 5px; font-size: 11.5px; color: var(--warn); }
+
+/* Learn from user */
+.learn-bar { margin: 0 12px 8px; }
+.learn-start { width: 100%; display: flex; align-items: center; justify-content: center; gap: 7px; padding: 7px 10px; font-weight: 600; }
+.rec-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--bad); display: inline-block; flex: none; }
+.rec-dot.live { animation: rec-pulse 1.2s ease-in-out infinite; }
+@keyframes rec-pulse { 50% { opacity: .25; } }
+@media (prefers-reduced-motion: reduce) { .rec-dot.live { animation: none; } }
+.learn-live { padding: 8px 10px; background: var(--panel); border: 1px solid var(--bad); border-radius: 10px; }
+.learn-live p { margin: 3px 0 4px; }
+.learn-head { display: flex; align-items: center; gap: 7px; }
+.learn-recent { list-style: none; margin: 4px 0 0; padding: 0; font-size: 11.5px; font-family: ui-monospace, monospace; color: var(--muted); }
+.learn-recent li { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 1px 0; }
+.learn-result { margin-top: 6px; padding: 0 2px; }
+.learn-result.ok { color: var(--ok); } .learn-result.bad { color: var(--bad); }
+[hidden] { display: none !important; }

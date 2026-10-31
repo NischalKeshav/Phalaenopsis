@@ -5,7 +5,9 @@
 
   let lastKey = null;
   let recording = false;
-  let actions = [];
+  // "Learn from user": moves not yet handed to the background worker.
+  let pending = [];
+  let flushTimer = null;
   let observeTimer = null;
   let executing = false;
 
@@ -27,6 +29,8 @@
     const key = PhalFP.fieldsKey(page.fields) + "\n" + location.href.split("#")[0];
     if (!force && key === lastKey) return;
     lastKey = key;
+    // Moves made before this page change belong to the previous page node.
+    flushMoves();
     // Fieldless pages (e.g. a list with an "Add New" link) only match nodes
     // the agent already created; they never create new ones.
     send({ type: "observe", page, create: page.fields.length > 0 });
@@ -469,8 +473,6 @@
     } finally {
       executing = false;
       if (typeof PhalCursor !== "undefined") PhalCursor.idle();
-      // Our own edits must not be learned as user actions.
-      actions = actions.filter((a) => a.ts < executeStartedAt);
     }
     if (result.ok && result.ran === 0 && steps.length > 0) {
       result.ok = false;
@@ -483,26 +485,47 @@
     }
     return result;
   }
-  let executeStartedAt = 0;
 
-  // ---------- recording ----------
+  // ---------- recording ("Learn from user") ----------
+  // Only real, trusted events from the person count; the agent's own actions
+  // dispatch untrusted events (or touch the element first, for toggles).
   function record(op, ev) {
-    if (!recording || executing) return;
+    if (!recording || executing || !ev.isTrusted) return;
     const el = ev.target;
     if (!(el instanceof Element)) return;
+    const touchedAt = agentTouched.get(el);
+    if (touchedAt && Date.now() - touchedAt < 2500) return;
     const tag = el.tagName.toLowerCase();
     const isField = tag === "input" || tag === "select" || tag === "textarea";
     if (op === "click") {
       const clickable = el.closest("button, a, [role=button], input[type=submit], input[type=button], input[type=checkbox], input[type=radio], label");
       if (!clickable) return;
-      actions.push({ op, selector: PhalFP.selectorFor(clickable), value: null, ts: Date.now() });
+      const label = (clickable.innerText || clickable.value || clickable.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim().slice(0, 60);
+      pending.push({ op, selector: PhalFP.selectorFor(clickable), value: null, label, ts: Date.now() });
+      flushMoves(); // a click may navigate away; hand it over now
       return;
     }
     if (!isField) return;
+    if (el.type === "password") return; // never store passwords in the graph
     let value = el.value;
     if (el.type === "checkbox" || el.type === "radio") value = el.checked ? "true" : "false";
-    actions.push({ op, selector: PhalFP.selectorFor(el), value, ts: Date.now() });
+    const selector = PhalFP.selectorFor(el);
+    const label = PhalFP.fieldSig(el).label || el.getAttribute("name") || "";
+    const last = pending[pending.length - 1];
+    // Typing fires one input event per key; keep only the latest value.
+    if (op === "input" && last && last.op === "input" && last.selector === selector) pending.pop();
+    pending.push({ op, selector, value, label: label.slice(0, 60), ts: Date.now() });
+    clearTimeout(flushTimer);
+    if (op === "change") flushMoves();
+    else flushTimer = setTimeout(flushMoves, 500);
   }
+
+  function flushMoves() {
+    clearTimeout(flushTimer);
+    if (!pending.length) return;
+    send({ type: "learnActions", actions: pending.splice(0) });
+  }
+
   // Edits the person makes themselves while the agent is working. Everything the
   // agent does dispatches untrusted events, so isTrusted alone tells them apart,
   // even mid-batch. Reported with the next snapshot so the agent respects them.
@@ -527,17 +550,12 @@
   document.addEventListener("change", (e) => record("change", e), true);
   document.addEventListener("click", (e) => record("click", e), true);
 
-  window.addEventListener("pagehide", () => {
-    if (recording && actions.length) {
-      send({ type: "recordingFlush", actions: actions.splice(0) });
-    }
-  });
+  window.addEventListener("pagehide", () => { if (recording) flushMoves(); });
 
   // ---------- messages ----------
   chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
     switch (msg.type) {
       case "execute":
-        executeStartedAt = Date.now();
         executeSteps(msg.steps || [], msg.profile || {}, !!msg.continueOnError, msg.pace, msg.cursor).then(respond);
         return true;
       case "agentSnapshot": {
@@ -556,15 +574,13 @@
         return false;
       case "setRecording":
         recording = !!msg.on;
-        if (!recording) actions = [];
+        if (!recording) { clearTimeout(flushTimer); pending = []; }
         respond({ ok: true });
         return false;
-      case "getRecording":
-        respond({ actions: actions.slice() });
-        return false;
-      case "clearRecording":
-        actions = [];
-        respond({ ok: true });
+      case "takeRecording":
+        // Hand back unsent moves directly so stopping never races a flush.
+        clearTimeout(flushTimer);
+        respond({ actions: pending.splice(0) });
         return false;
       default:
         return false;
@@ -573,7 +589,7 @@
 
   // ---------- boot ----------
   send({ type: "getMode" }).then((resp) => {
-    recording = !!(resp && resp.mode === "record");
+    recording = !!(resp && resp.learning);
     observeNow(true);
   });
   const mo = new MutationObserver(scheduleObserve);

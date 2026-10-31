@@ -250,6 +250,62 @@ impl MemoryController {
         self.add_script(&obs.id, script).await
     }
 
+    /// Save a "Learn from user" demonstration: the moves a person made across one
+    /// or more pages, split by the page node they were on. Each page with
+    /// learnable moves gets a recorded script; consecutive pages get a transition
+    /// edge tagged with the script that led from one to the next.
+    pub async fn learn_session(&self, segments: &[LearnSegment]) -> Result<LearnSessionResponse> {
+        // Moves on the same node in a row are one visit, even if the extension split them.
+        let mut visits: Vec<(String, Vec<RecordedAction>)> = Vec::new();
+        for seg in segments {
+            if seg.observation_id.trim().is_empty() {
+                continue;
+            }
+            match visits.last_mut() {
+                Some((id, actions)) if *id == seg.observation_id => actions.extend(seg.actions.iter().cloned()),
+                _ => visits.push((seg.observation_id.clone(), seg.actions.clone())),
+            }
+        }
+        let profile = self.store.profile_all().await?;
+        let mut out = LearnSessionResponse::default();
+        // (observation, script learned there) for each visit that resolved to a node.
+        let mut path: Vec<(String, Option<String>)> = Vec::new();
+        for (observation_id, actions) in &visits {
+            let Some(obs) = self.store.get_observation(observation_id).await? else {
+                out.skipped.push(format!("page {observation_id} is not in the graph"));
+                continue;
+            };
+            let steps = actions_to_steps(&obs, actions, &profile);
+            let script_id = if steps.is_empty() {
+                None
+            } else {
+                let script = ToolScript {
+                    id: new_id(),
+                    name: format!("Learned from you on {}", short_title(&obs)),
+                    body: ScriptBody::Steps(steps),
+                    origin: Origin::Recorded,
+                    created_at: Utc::now(),
+                };
+                let ranked = self.add_script(&obs.id, script).await?;
+                let id = ranked.script.id.clone();
+                out.scripts.push(ranked);
+                Some(id)
+            };
+            path.push((obs.id.clone(), script_id));
+        }
+        for pair in path.windows(2) {
+            let ((from, via), (to, _)) = (&pair[0], &pair[1]);
+            if from != to {
+                out.transitions.push(self.store.add_transition(from, to, via.as_deref()).await?);
+            }
+        }
+        out.pages = path.len();
+        if out.scripts.is_empty() && out.transitions.is_empty() {
+            return Err(anyhow!("no actions worth learning"));
+        }
+        Ok(out)
+    }
+
     pub async fn report_run(&self, report: RunReport) -> Result<RunResponse> {
         if !report.ok {
             tracing::info!(
@@ -267,6 +323,26 @@ impl MemoryController {
         }
         Ok(RunResponse { confidence: edge.confidence(), edge, transition })
     }
+}
+
+/// Moves recorded while the browser was on one page node.
+#[derive(Deserialize, Debug, Clone)]
+pub struct LearnSegment {
+    pub observation_id: String,
+    #[serde(default)]
+    pub actions: Vec<RecordedAction>,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+pub struct LearnSessionResponse {
+    /// One recorded script per page where the person did something learnable.
+    pub scripts: Vec<RankedScript>,
+    /// Page-to-page edges the demonstration walked.
+    pub transitions: Vec<Transition>,
+    /// Distinct page visits that made it into the graph.
+    pub pages: usize,
+    /// Why some recorded moves were dropped.
+    pub skipped: Vec<String>,
 }
 
 fn short_title(obs: &Observation) -> String {
@@ -488,5 +564,55 @@ mod tests {
                 Step::Click { selector: "#next".into() },
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn learn_session_saves_a_script_per_page_and_links_them() {
+        let c = controller();
+        let list = c.observe(ObserveRequest { page: page("https://a.com/list", vec![]), previous: None, generate: false, create: true }).await.unwrap().unwrap();
+        let form = c
+            .observe(ObserveRequest { page: page("https://a.com/form", vec![field("#name", "input", "text", "name")]), previous: None, generate: false, create: true })
+            .await
+            .unwrap()
+            .unwrap();
+        let (list_id, form_id) = (list.observation.id.clone(), form.observation.id.clone());
+        let seg = |id: &str, actions: Vec<RecordedAction>| LearnSegment { observation_id: id.into(), actions };
+        let out = c
+            .learn_session(&[
+                seg(&list_id, vec![act("click", "#add", None)]),
+                // Split by the extension mid-visit; must merge into one script.
+                seg(&form_id, vec![act("input", "#name", Some("Calc"))]),
+                seg(&form_id, vec![act("click", "#save", None)]),
+                seg("", vec![act("click", "#lost", None)]),
+            ])
+            .await
+            .unwrap();
+        assert_eq!(out.pages, 2);
+        assert_eq!(out.scripts.len(), 2);
+        assert!(out.scripts.iter().all(|s| s.script.origin == Origin::Recorded));
+        let ScriptBody::Steps(form_steps) = &out.scripts[1].script.body else { panic!("expected steps") };
+        assert_eq!(form_steps.len(), 2);
+        assert_eq!(out.transitions.len(), 1);
+        let t = &out.transitions[0];
+        assert_eq!((t.from.as_str(), t.to.as_str()), (list_id.as_str(), form_id.as_str()));
+        assert_eq!(t.via.as_deref(), Some(out.scripts[0].script.id.as_str()));
+        assert_eq!(c.ranked_scripts(&form_id).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn learn_session_reports_unknown_pages_and_rejects_empty() {
+        let c = controller();
+        let err = c.learn_session(&[LearnSegment { observation_id: "nope".into(), actions: vec![act("click", "#x", None)] }]).await.unwrap_err();
+        assert!(err.to_string().contains("no actions worth learning"));
+        let r = c.observe(ObserveRequest { page: page("https://a.com/1", vec![field("#a", "input", "text", "a")]), previous: None, generate: false, create: true }).await.unwrap().unwrap();
+        let out = c
+            .learn_session(&[
+                LearnSegment { observation_id: "nope".into(), actions: vec![act("click", "#x", None)] },
+                LearnSegment { observation_id: r.observation.id.clone(), actions: vec![act("input", "#a", Some("hi"))] },
+            ])
+            .await
+            .unwrap();
+        assert_eq!(out.scripts.len(), 1);
+        assert_eq!(out.skipped.len(), 1);
     }
 }

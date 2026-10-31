@@ -13,7 +13,6 @@
       <option value="off">Off</option>
       <option value="replay">Replay on click</option>
       <option value="auto">Auto-replay</option>
-      <option value="record">Record me</option>
     </select>
   </header>
 
@@ -23,6 +22,23 @@
       <div id="pageTitle" class="page-title">No page yet</div>
       <div id="pageMeta" class="muted small"></div>
     </div>
+  </div>
+
+  <!-- Learn from user: record the person's own moves into the graph -->
+  <div id="learnBar" class="learn-bar">
+    <button id="learnStart" class="learn-start" title="Do the task yourself. Your clicks and entries on each page are saved to the graph so Phalaenopsis can repeat them.">
+      <span class="rec-dot"></span> Learn from user
+    </button>
+    <div id="learnLive" class="learn-live" hidden>
+      <div class="learn-head"><span class="rec-dot live"></span><strong>Learning</strong> <span id="learnCount" class="muted small"></span></div>
+      <p class="muted small">Do the task yourself in this tab. Passwords are never recorded.</p>
+      <ul id="learnRecent" class="learn-recent"></ul>
+      <div class="row">
+        <button id="learnSave" class="primary">Stop &amp; save</button>
+        <button id="learnDiscard" class="danger">Discard</button>
+      </div>
+    </div>
+    <div id="learnResult" class="learn-result small" hidden></div>
   </div>
 
   <nav class="tabs">
@@ -92,10 +108,7 @@
     <section id="tab-memory" class="tab">
       <div class="row between">
         <span class="muted small">Scripts this page's node links to, best first.</span>
-        <span>
-          <button id="rescan">Re-scan</button>
-          <button id="learn" title="Save actions recorded in Record mode">Save recording</button>
-        </span>
+        <button id="rescan">Re-scan</button>
       </div>
       <ul id="scripts" class="list"></ul>
       <div id="next" class="muted small"></div>

@@ -50,3 +50,14 @@ No npm packages.
 | coursework | `autofill_extension/test/coursework_mit.html` | Add New dialogs, radio groups, required-field popups, transcript |
 
 Data comes from a fictional persona (Jordan Lee) and a fake transcript in `scenarios.mjs`.
+
+## Learn from user
+
+`node eval/learn-from-user.mjs` (after `cargo build`) checks the side panel's
+"Learn from user" recording end to end without a model key. It runs the real
+`background.js` in Node behind a fake `chrome.*` API, the real content scripts in
+headless Chrome, and the backend with an in-memory store on port 7797. A simulated
+person types and clicks (trusted DevTools input) through `form.html` -> `form2.html`.
+The test then saves and checks that each page got a `recorded` script, a transition
+edge links the two pages via the first page's script, profile values became
+`{profile}` references, and neither a typed password nor the agent's own fills were stored.

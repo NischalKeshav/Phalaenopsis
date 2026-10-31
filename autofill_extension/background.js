@@ -21,6 +21,8 @@ chrome.action.onClicked.addListener((tab) => {
 
 async function settings() {
   const stored = await chrome.storage.local.get(DEFAULTS);
+  // "Record me" used to be a mode; recording is now the per-tab "Learn from user" button.
+  if (stored.mode === "record") stored.mode = DEFAULTS.mode;
   return { ...DEFAULTS, ...stored };
 }
 
@@ -52,7 +54,12 @@ async function setTab(tabId, state) {
   chrome.runtime.sendMessage({ type: "tabStateChanged", tabId }).catch(() => {});
 }
 
-chrome.tabs.onRemoved.addListener((tabId) => chrome.storage.session.remove(tabKey(tabId)));
+chrome.tabs.onRemoved.addListener(async (tabId) => {
+  // Closing the tab mid-demonstration still keeps what was recorded.
+  const learning = await getLearn(tabId);
+  if (learning.on) await saveLearning(tabId, learning).catch(() => {});
+  chrome.storage.session.remove([tabKey(tabId), learnKey(tabId)]);
+});
 
 async function badge(tabId, text, color) {
   try {
@@ -80,7 +87,11 @@ function safeToAutoRun(script) {
 
 async function handleObserve(tabId, page, create = true) {
   const cfg = await settings();
-  if (cfg.mode === "off") return;
+  // While learning, every page the person passes through becomes a node so
+  // the demonstration can be stored as a path through the graph.
+  const learning = (await getLearn(tabId)).on;
+  if (cfg.mode === "off" && !learning) return;
+  if (learning) create = true;
   const state = await getTab(tabId);
   const previous = state.observationId
     ? { observation_id: state.observationId, script_id: state.lastRun ? state.lastRun.scriptId : null }
@@ -108,9 +119,11 @@ async function handleObserve(tabId, page, create = true) {
   };
   await setTab(tabId, next);
   const n = result.scripts.length;
-  await badge(tabId, result.matched ? (n ? String(n) : "✓") : "?", result.matched ? "#15803d" : "#b45309");
+  if (learning) await badge(tabId, "REC", "#b91c1c");
+  else await badge(tabId, result.matched ? (n ? String(n) : "✓") : "?", result.matched ? "#15803d" : "#b45309");
 
-  if (cfg.mode === "auto" && n > 0) {
+  // Never replay over the person while they are demonstrating.
+  if (cfg.mode === "auto" && n > 0 && !learning) {
     const top = result.scripts[0];
     if ((result.generated || top.confidence >= cfg.autoThreshold) && safeToAutoRun(top)) {
       await runScript(tabId, top.id);
@@ -178,20 +191,90 @@ async function runJs(tabId, code, profile) {
   }
 }
 
-async function learnFromTab(tabId, actions) {
-  const state = await getTab(tabId);
-  if (!state.observationId) throw new Error("no observation for this tab yet");
-  if (!actions) {
-    const r = await sendToTab(tabId, { type: "getRecording" });
-    actions = (r && r.actions) || [];
+// ---------- "Learn from user" ----------
+// The person demonstrates a task; every move is attributed to the page node
+// the tab was on at the time, so a multi-page flow is saved as one script per
+// page plus the transitions between them.
+const learnKey = (tabId) => `learn:${tabId}`;
+const LEARN_OFF = { on: false, startedAt: 0, segments: [] };
+
+async function getLearn(tabId) {
+  const r = await chrome.storage.session.get(learnKey(tabId));
+  return r[learnKey(tabId)] || { ...LEARN_OFF };
+}
+
+async function setLearn(tabId, learning) {
+  await chrome.storage.session.set({ [learnKey(tabId)]: learning });
+  chrome.runtime.sendMessage({ type: "learnChanged", tabId }).catch(() => {});
+}
+
+// Moves arrive in bursts; apply them one batch at a time so none are lost.
+let learnQueue = Promise.resolve();
+function serialLearn(fn) {
+  const next = learnQueue.then(fn, fn);
+  learnQueue = next.catch(() => {});
+  return next;
+}
+
+function appendMoves(tabId, actions) {
+  return serialLearn(async () => {
+    const learning = await getLearn(tabId);
+    if (!learning.on || !actions || !actions.length) return learning;
+    const state = await getTab(tabId);
+    const observationId = state.observationId || null;
+    const title = state.result ? state.result.observation.title || state.result.observation.host : "";
+    let seg = learning.segments[learning.segments.length - 1];
+    if (!seg || seg.observationId !== observationId) {
+      seg = { observationId, title, url: state.page ? state.page.url : "", actions: [] };
+      learning.segments.push(seg);
+    }
+    seg.actions.push(...actions);
+    await setLearn(tabId, learning);
+    return learning;
+  });
+}
+
+function learnSummary(learning) {
+  const moves = learning.segments.reduce((n, s) => n + s.actions.length, 0);
+  const pages = new Set(learning.segments.filter((s) => s.actions.length).map((s) => s.observationId)).size;
+  const recent = learning.segments.flatMap((s) => s.actions).slice(-6);
+  return { on: learning.on, startedAt: learning.startedAt, moves, pages, recent };
+}
+
+async function startLearning(tabId) {
+  await setLearn(tabId, { on: true, startedAt: Date.now(), segments: [] });
+  await sendToTab(tabId, { type: "setRecording", on: true });
+  // Make sure the starting page is a node even if the mode is Off or it has no fields.
+  await sendToTab(tabId, { type: "reobserve" });
+  await badge(tabId, "REC", "#b91c1c");
+  return learnSummary(await getLearn(tabId));
+}
+
+async function saveLearning(tabId, learning) {
+  const segments = learning.segments
+    .filter((s) => s.observationId && s.actions.length)
+    .map((s) => ({ observation_id: s.observationId, actions: s.actions }));
+  const dropped = learning.segments.filter((s) => !s.observationId).reduce((n, s) => n + s.actions.length, 0);
+  if (!segments.length) {
+    throw new Error(dropped ? "the page was never matched to a node (is the backend running?)" : "nothing recorded yet");
   }
-  if (!actions.length) throw new Error("nothing recorded yet");
-  const script = await api("/v1/learn", "POST", { observation_id: state.observationId, actions });
-  await sendToTab(tabId, { type: "clearRecording" });
-  const fresh = await getTab(tabId);
-  if (fresh.result) fresh.result.scripts.unshift(script);
-  await setTab(tabId, fresh);
-  return script;
+  const saved = await api("/v1/learn/session", "POST", { segments });
+  if (dropped) saved.skipped.push(`${dropped} move(s) made before the page was observed`);
+  return saved;
+}
+
+async function stopLearning(tabId, save) {
+  const leftover = await sendToTab(tabId, { type: "takeRecording" });
+  if (leftover && leftover.actions && leftover.actions.length) await appendMoves(tabId, leftover.actions);
+  const learning = await serialLearn(() => getLearn(tabId));
+  await setLearn(tabId, { ...LEARN_OFF });
+  await sendToTab(tabId, { type: "setRecording", on: false });
+  await badge(tabId, "");
+  if (!save || !learning.on) return { saved: null };
+  const saved = await saveLearning(tabId, learning);
+  // Refresh this tab's node so the Memory tab lists the new scripts.
+  await sendToTab(tabId, { type: "reobserve" });
+  return { saved };
 }
 
 async function generateForTab(tabId) {
@@ -211,8 +294,7 @@ async function setMode(mode) {
   await chrome.storage.local.set({ mode });
   const tabs = await chrome.tabs.query({});
   for (const t of tabs) {
-    if (t.id != null) sendToTab(t.id, { type: "setRecording", on: mode === "record" });
-    if (mode === "off" && t.id != null) badge(t.id, "");
+    if (mode === "off" && t.id != null && !(await getLearn(t.id)).on) badge(t.id, "");
   }
 }
 
@@ -225,10 +307,19 @@ chrome.runtime.onMessage.addListener((msg, sender, respond) => {
       reply(handleObserve(tabId, msg.page, msg.create !== false));
       return true;
     case "getMode":
-      settings().then((s) => respond({ mode: s.mode }));
+      Promise.all([settings(), tabId != null ? getLearn(tabId) : LEARN_OFF]).then(([s, l]) => respond({ mode: s.mode, learning: !!l.on }));
       return true;
-    case "recordingFlush":
-      reply(learnFromTab(tabId, msg.actions));
+    case "learnActions":
+      reply(appendMoves(tabId, msg.actions).then(() => null));
+      return true;
+    case "learnStart":
+      reply(startLearning(tabId));
+      return true;
+    case "learnStop":
+      reply(stopLearning(tabId, msg.save !== false));
+      return true;
+    case "learnStatus":
+      reply(getLearn(tabId).then(learnSummary));
       return true;
     case "getTabState":
       reply(Promise.all([getTab(tabId), settings()]).then(([state, cfg]) => ({ state, cfg })));
@@ -238,9 +329,6 @@ chrome.runtime.onMessage.addListener((msg, sender, respond) => {
       return true;
     case "generate":
       reply(generateForTab(tabId));
-      return true;
-    case "learnNow":
-      reply(learnFromTab(tabId, null));
       return true;
     case "deleteScript":
       reply(api(`/v1/scripts/${encodeURIComponent(msg.scriptId)}`, "DELETE").then(async (r) => {

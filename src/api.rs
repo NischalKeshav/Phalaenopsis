@@ -1,6 +1,6 @@
 //! HTTP surface used by the Chrome extension.
 
-use crate::controller::{MemoryController, ObserveRequest, RankedScript, RunReport};
+use crate::controller::{LearnSegment, LearnSessionResponse, MemoryController, ObserveRequest, RankedScript, RunReport};
 use crate::model::*;
 use crate::agent::{AgentStepRequest, AgentStepResponse, StepResult};
 use axum::{
@@ -55,6 +55,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/scripts/{id}", get(get_script).delete(delete_script))
         .route("/v1/generate", post(generate))
         .route("/v1/learn", post(learn))
+        .route("/v1/learn/session", post(learn_session))
         .route("/v1/runs", post(report_run))
         .route("/v1/profile", get(get_profile).put(put_profile))
         .route("/v1/profile/{key}", delete(delete_profile_key))
@@ -167,6 +168,16 @@ struct LearnRequest {
 
 async fn learn(State(s): State<AppState>, Json(req): Json<LearnRequest>) -> ApiResult<RankedScript> {
     Ok(Json(s.controller.learn(&req.observation_id, &req.actions).await?))
+}
+
+#[derive(Deserialize)]
+struct LearnSessionRequest {
+    segments: Vec<LearnSegment>,
+}
+
+/// "Learn from user": a whole demonstration, possibly spanning several pages.
+async fn learn_session(State(s): State<AppState>, Json(req): Json<LearnSessionRequest>) -> ApiResult<LearnSessionResponse> {
+    Ok(Json(s.controller.learn_session(&req.segments).await?))
 }
 
 async fn report_run(State(s): State<AppState>, Json(req): Json<RunReport>) -> ApiResult<crate::controller::RunResponse> {

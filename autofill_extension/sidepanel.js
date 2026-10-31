@@ -147,13 +147,70 @@ async function refreshPage() {
     }
     list.append(item);
   }
-  if (!r.scripts.length) list.append(el("li", { class: "muted", text: "Nothing saved for this page yet. Ask the agent, or switch to Record and fill it yourself." }));
+  if (!r.scripts.length) list.append(el("li", { class: "muted", text: "Nothing saved for this page yet. Ask the agent, or click Learn from user and fill it yourself." }));
   $("next").textContent = r.next && r.next.length ? "Leads to: " + r.next.map((t) => `${t.to.slice(0, 8)} (${t.hits}×)`).join(", ") : "";
 }
 
 async function act(fn) {
   showError(null);
   try { await fn(); } catch (e) { showError(e); }
+  await refreshPage();
+}
+
+// ---------- learn from user ----------
+function describeMove(a) {
+  const what = a.label ? JSON.stringify(a.label) : a.selector;
+  if (a.op === "click") return `click ${what}`;
+  const v = a.value === "true" ? "checked" : a.value === "false" ? "unchecked" : JSON.stringify(String(a.value ?? "").slice(0, 40));
+  return `${what} = ${v}`;
+}
+
+async function refreshLearn() {
+  if (tabId == null) return;
+  let st;
+  try { st = await bg({ type: "learnStatus" }); } catch (_) { return; }
+  $("learnStart").hidden = st.on;
+  $("learnLive").hidden = !st.on;
+  if (!st.on) return;
+  $("learnCount").textContent = st.moves
+    ? `· ${st.moves} move${st.moves === 1 ? "" : "s"} on ${st.pages} page${st.pages === 1 ? "" : "s"}`
+    : "· waiting for your first move";
+  $("learnRecent").replaceChildren(...st.recent.map((a) => el("li", { text: describeMove(a) })));
+}
+
+function showLearnResult(text, bad) {
+  const box = $("learnResult");
+  box.hidden = !text;
+  box.textContent = text || "";
+  box.className = "learn-result small " + (bad ? "bad" : "ok");
+}
+
+async function startLearning() {
+  showError(null);
+  showLearnResult("");
+  try {
+    await ensureContent();
+    await bg({ type: "learnStart" });
+  } catch (e) { showError(e); }
+  await refreshLearn();
+}
+
+async function stopLearning(save) {
+  showError(null);
+  try {
+    const { saved } = await bg({ type: "learnStop", save });
+    if (saved) {
+      const steps = saved.scripts.reduce((n, s) => n + (Array.isArray(s.body) ? s.body.length : 1), 0);
+      const parts = [`💾 Learned ${steps} step${steps === 1 ? "" : "s"} on ${saved.pages} page${saved.pages === 1 ? "" : "s"}`];
+      if (saved.transitions.length) parts.push(`${saved.transitions.length} page-to-page link${saved.transitions.length === 1 ? "" : "s"}`);
+      let text = parts.join(", ") + ". Saved to the graph; find it under Memory.";
+      if (saved.skipped.length) text += " Skipped: " + saved.skipped.join("; ");
+      showLearnResult(text, false);
+    } else if (!save) showLearnResult("Recording discarded.", false);
+  } catch (e) {
+    showLearnResult("Nothing saved: " + (e.message || e), true);
+  }
+  await refreshLearn();
   await refreshPage();
 }
 
@@ -473,7 +530,10 @@ async function syncLockedTab() {
 
 chrome.tabs.onUpdated.addListener((id, info) => { if (id === tabId && (info.url || info.status === "complete")) syncLockedTab(); });
 chrome.tabs.onRemoved.addListener((id) => { if (id === tabId) window.close(); });
-chrome.runtime.onMessage.addListener((msg) => { if (msg.type === "tabStateChanged" && msg.tabId === tabId) refreshPage(); });
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg.type === "tabStateChanged" && msg.tabId === tabId) refreshPage();
+  if (msg.type === "learnChanged" && msg.tabId === tabId) refreshLearn();
+});
 
 document.addEventListener("DOMContentLoaded", async () => {
   for (const b of document.querySelectorAll(".tabs button")) b.addEventListener("click", () => selectTab(b.dataset.tab));
@@ -516,10 +576,13 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("pace").addEventListener("change", () => chrome.storage.local.set({ pace: $("pace").value }));
   $("mode").addEventListener("change", () => act(() => bg({ type: "setMode", mode: $("mode").value })));
   $("rescan").addEventListener("click", () => act(async () => { await ensureContent(); await bg({ type: "reobserve" }); await sleep(600); }));
-  $("learn").addEventListener("click", () => act(() => bg({ type: "learnNow" })));
+  $("learnStart").addEventListener("click", startLearning);
+  $("learnSave").addEventListener("click", () => stopLearning(true));
+  $("learnDiscard").addEventListener("click", () => stopLearning(false));
   $("addFact").addEventListener("click", () => addFactRow());
   $("saveProfile").addEventListener("click", () => act(saveProfile));
   $("saveSettings").addEventListener("click", () => act(async () => { await bg({ type: "setBackendUrl", backendUrl: $("backendUrl").value }); await health(); }));
   await health();
   await syncLockedTab();
+  await refreshLearn();
 });
