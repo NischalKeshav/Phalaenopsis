@@ -55,9 +55,9 @@
   // How long to give the page between actions. Real portals open dialogs,
   // load dependent dropdowns and validate fields asynchronously.
   const PACES = {
-    fast: { step: 0, clickMin: 150, quiet: 150, settleMax: 1500, find: 3000, typeDelay: 0 },
-    normal: { step: 150, clickMin: 400, quiet: 300, settleMax: 4000, find: 6000, typeDelay: 0 },
-    careful: { step: 400, clickMin: 800, quiet: 600, settleMax: 8000, find: 10000, typeDelay: 35 },
+    fast: { step: 0, clickMin: 150, quiet: 150, settleMax: 1500, find: 3000, typeDelay: 0, cursor: 0.5 },
+    normal: { step: 150, clickMin: 400, quiet: 300, settleMax: 4000, find: 6000, typeDelay: 0, cursor: 1 },
+    careful: { step: 400, clickMin: 800, quiet: 600, settleMax: 8000, find: 10000, typeDelay: 35, cursor: 1.4 },
   };
   let pace = PACES.normal;
 
@@ -119,17 +119,56 @@
     fire(el, "focusout");
   }
 
-  // Fill, then check the page kept the value; retry once by typing if it was wiped.
+  // Letters and digits only: compares what was meant with what the field shows,
+  // ignoring formatting a mask adds ("(617) 555-0142" vs "6175550142").
+  const alnum = (v) => String(v || "").replace(/[^0-9a-z]/gi, "").toLowerCase();
+  const stuck = (el, value) => {
+    const want = alnum(value), got = alnum(el.value);
+    return want === "" ? true : got === want || (got.length >= want.length && got.includes(want));
+  };
+
+  // Emulate a keyboard: keydown, keypress (with legacy keyCode/charCode/which,
+  // which input-mask plugins read), then insert the character only if the page
+  // did not handle it itself (preventDefault), like the browser's default action.
+  async function typeLikeKeyboard(el, value) {
+    const setter = SETTERS[el.tagName.toLowerCase()] || ((v) => (el.value = v));
+    el.scrollIntoView({ block: "center" });
+    el.focus();
+    fire(el, "focus");
+    await sleep(60); // mask plugins move the caret on focus, asynchronously
+    try { el.setSelectionRange(0, el.value.length); } catch (_) {}
+    for (const ch of value) {
+      const code = ch.charCodeAt(0);
+      const opts = { key: ch, bubbles: true, cancelable: true, keyCode: code, charCode: code, which: code };
+      el.dispatchEvent(new KeyboardEvent("keydown", { ...opts, charCode: 0 }));
+      const pressed = el.dispatchEvent(new KeyboardEvent("keypress", opts));
+      if (pressed) {
+        let start = el.value.length, end = el.value.length;
+        try { start = el.selectionStart; end = el.selectionEnd; } catch (_) {}
+        const next = el.value.slice(0, start) + ch + el.value.slice(end);
+        setter.call(el, next);
+        try { el.setSelectionRange(start + 1, start + 1); } catch (_) {}
+        el.dispatchEvent(new InputEvent("input", { bubbles: true, data: ch, inputType: "insertText" }));
+      }
+      el.dispatchEvent(new KeyboardEvent("keyup", { ...opts, charCode: 0 }));
+      await sleep(Math.max(15, pace.typeDelay || 0));
+    }
+    fire(el, "change");
+    el.blur();
+    fire(el, "focusout");
+  }
+
+  // Fill, then check the page kept the value. If a script or input mask wiped or
+  // rejected it, type it key by key instead.
   async function fillAndVerify(el, value) {
     await setNativeValue(el, value);
     await sleep(Math.max(80, pace.step));
-    if (value !== "" && el.value === "" && pace.typeDelay === 0) {
-      const saved = pace;
-      pace = { ...pace, typeDelay: 30 };
-      try { await setNativeValue(el, value); } finally { pace = saved; }
-      await sleep(150);
+    if (stuck(el, value)) return;
+    await typeLikeKeyboard(el, value);
+    await sleep(150);
+    if (!stuck(el, value)) {
+      throw new Error(`the field did not accept the value (it shows ${JSON.stringify(el.value)})`);
     }
-    if (value !== "" && el.value === "") throw new Error("the page cleared the value after it was entered");
   }
 
   function waitFor(selector, timeoutMs) {
@@ -203,7 +242,8 @@
       group.find((r) => label(r).startsWith(want) || want.startsWith(label(r)) && label(r).length > 0) ||
       group.find((r) => label(r).includes(want));
     if (!pick) throw new Error(`no radio option matching "${value}" (options: ${group.map((r) => PhalFP.fieldSig(r).label || r.value).join(", ")})`);
-    pick.scrollIntoView({ block: "center" });
+    await point(pick.labels && pick.labels[0] ? pick.labels[0] : pick, `Choose ${JSON.stringify(PhalFP.fieldSig(pick).label || value)}`);
+    await tap();
     if (!pick.checked) pick.click();
     await settle(pace.quiet, pace.settleMax);
     if (!pick.checked) throw new Error(`radio option "${value}" did not stay selected`);
@@ -224,6 +264,15 @@
     throw new Error(`cannot set a value on <${tag}>`);
   }
 
+  // Show the virtual cursor on the element about to be used (see shared/cursor.js).
+  const fieldName = (el) => (PhalFP.fieldSig(el).label || el.getAttribute("name") || el.id || "").replace(/\s*\*\s*$/, "").slice(0, 40);
+  async function point(el, text) {
+    if (typeof PhalCursor === "undefined" || !el) return;
+    el.scrollIntoView({ block: "center", behavior: "instant" });
+    await PhalCursor.moveTo(el, text, pace.cursor || 1);
+  }
+  const tap = async () => { if (typeof PhalCursor !== "undefined") await PhalCursor.click(pace.cursor || 1); };
+
   async function runStep(step, profile) {
     // Fields often appear a moment after a click (new row, dialog), so wait briefly.
     const need = async (sel) => {
@@ -234,16 +283,16 @@
       }
     };
     switch (step.op) {
-      case "fill": {
-        const r = resolveValue(step.value, profile);
-        if (r.skip) return { skipped: r.skip };
-        await setField(await need(step.selector), r.value);
-        return {};
-      }
+      case "fill":
       case "select": {
         const r = resolveValue(step.value, profile);
         if (r.skip) return { skipped: r.skip };
-        await setField(await need(step.selector), r.value);
+        const el = await need(step.selector);
+        if (el.type !== "radio") {
+          await point(el, `${step.op === "fill" ? "Type" : "Choose"} ${JSON.stringify(r.value.slice(0, 30))} · ${fieldName(el)}`);
+          await tap();
+        }
+        await setField(el, r.value);
         return {};
       }
       case "check": {
@@ -257,7 +306,8 @@
         }
         const want = ["true", "yes", "1", "on", "checked"].includes(r.value.trim().toLowerCase());
         if (el.checked !== want) {
-          el.scrollIntoView({ block: "center" });
+          await point(el, `${want ? "Check" : "Uncheck"} · ${fieldName(el)}`);
+          await tap();
           el.click();
           await settle(pace.quiet, pace.settleMax);
         }
@@ -265,8 +315,10 @@
       }
       case "click": {
         const el = await need(step.selector);
-        el.scrollIntoView({ block: "center" });
+        const text = (el.innerText || el.value || el.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim().slice(0, 40);
+        await point(el, `Click ${text ? JSON.stringify(text) : ""}`.trim());
         await sleep(Math.min(pace.step, 200));
+        await tap();
         el.click();
         // Give the page time to react: at least clickMin, then until the DOM goes quiet.
         await sleep(pace.clickMin);
@@ -356,8 +408,9 @@
     return { events, interrupt };
   }
 
-  async function executeSteps(steps, profile, _continueOnError, paceName) {
+  async function executeSteps(steps, profile, _continueOnError, paceName, cursorOn) {
     pace = PACES[paceName] || PACES.normal;
+    if (typeof PhalCursor !== "undefined") PhalCursor.setEnabled(cursorOn !== false);
     executing = true;
     const t0 = performance.now();
     const result = { ok: true, ran: 0, skipped: [], failed_step: null, error: null, results: [], events: [], interrupted: null };
@@ -405,6 +458,7 @@
       if (tail.interrupt && !result.interrupted) result.interrupted = tail.interrupt;
     } finally {
       executing = false;
+      if (typeof PhalCursor !== "undefined") PhalCursor.idle();
       // Our own edits must not be learned as user actions.
       actions = actions.filter((a) => a.ts < executeStartedAt);
     }
@@ -439,6 +493,21 @@
     if (el.type === "checkbox" || el.type === "radio") value = el.checked ? "true" : "false";
     actions.push({ op, selector: PhalFP.selectorFor(el), value, ts: Date.now() });
   }
+  // Edits the person makes themselves while the agent is working. Everything the
+  // agent does dispatches untrusted events, so isTrusted alone tells them apart,
+  // even mid-batch. Reported with the next snapshot so the agent respects them.
+  const userEdits = new Map();
+  const noteUserEdit = (e) => {
+    if (!e.isTrusted) return;
+    const el = e.target;
+    if (!(el instanceof Element) || !el.matches("input, select, textarea")) return;
+    if (el.type === "password") return;
+    const sig = PhalFP.fieldSig(el);
+    const value = el.type === "checkbox" || el.type === "radio" ? String(el.checked) : String(el.value).slice(0, 200);
+    userEdits.set(sig.selector, { selector: sig.selector, label: sig.label, value });
+  };
+  document.addEventListener("input", noteUserEdit, true);
+  document.addEventListener("change", noteUserEdit, true);
   document.addEventListener("input", (e) => record("input", e), true);
   document.addEventListener("change", (e) => record("change", e), true);
   document.addEventListener("click", (e) => record("click", e), true);
@@ -454,11 +523,15 @@
     switch (msg.type) {
       case "execute":
         executeStartedAt = Date.now();
-        executeSteps(msg.steps || [], msg.profile || {}, !!msg.continueOnError, msg.pace).then(respond);
+        executeSteps(msg.steps || [], msg.profile || {}, !!msg.continueOnError, msg.pace, msg.cursor).then(respond);
         return true;
-      case "agentSnapshot":
-        respond(PhalFP.agentSnapshot());
+      case "agentSnapshot": {
+        const snap = PhalFP.agentSnapshot();
+        snap.user_edits = [...userEdits.values()];
+        userEdits.clear();
+        respond(snap);
         return false;
+      }
       case "snapshot":
         respond(PhalFP.snapshot());
         return false;

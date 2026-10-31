@@ -56,7 +56,7 @@ async function ensureContent(id = tabId) {
   if (pong) return true;
   try {
     await chrome.scripting.executeScript({ target: { tabId: id }, files: ["shared/netwatch.js"], world: "MAIN" });
-    await chrome.scripting.executeScript({ target: { tabId: id }, files: ["shared/fingerprint.js", "content.js"] });
+    await chrome.scripting.executeScript({ target: { tabId: id }, files: ["shared/fingerprint.js", "shared/cursor.js", "content.js"] });
     return true;
   } catch (e) {
     throw new Error("Can't read this page (" + (e.message || e) + "). Chrome blocks extensions on chrome:// and store pages.");
@@ -308,7 +308,7 @@ async function runAgent(prompt) {
       pendingPrompt = null;
       sessionId = resp.session_id;
       conversation = { sessionId, tabId: runTab };
-      planEl = renderPlan(resp.plan, resp.background, planEl);
+      planEl = renderPlan(resp.plan, resp.background, planEl, resp.usage);
 
       const bubble = chatAdd(el("div", { class: "msg agent" }, [el("div", { text: resp.message || (resp.done ? "Done." : "Working…") })]));
       if (resp.done) {
@@ -360,7 +360,7 @@ async function runAgent(prompt) {
 }
 
 // Live checklist of the background model's plan, updated every micro-turn.
-function renderPlan(plan, background, existing) {
+function renderPlan(plan, background, existing, usage) {
   if (!plan && !background) return existing;
   const box = existing || el("div", { class: "msg plan" });
   box.replaceChildren();
@@ -376,6 +376,13 @@ function renderPlan(plan, background, existing) {
     if (plan.questions && plan.questions.length) box.append(el("div", { class: "small", text: "Open questions: " + plan.questions.join(" · ") }));
   }
   if (background) box.append(el("div", { class: "muted small", text: "Background: " + background + "…" }));
+  if (usage) {
+    const t = ["interaction", "background"].reduce((a, k) => {
+      const u = usage[k] || {};
+      return { tokens: a.tokens + (u.prompt_tokens || 0) + (u.completion_tokens || 0), calls: a.calls + (u.calls || 0), cost: a.cost + (u.cost_usd || 0) };
+    }, { tokens: 0, calls: 0, cost: 0 });
+    box.append(el("div", { class: "muted small", text: `${t.calls} model calls · ${t.tokens.toLocaleString()} tokens${t.cost ? ` · $${t.cost.toFixed(4)}` : ""}` }));
+  }
   return box;
 }
 

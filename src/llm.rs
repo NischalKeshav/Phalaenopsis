@@ -41,6 +41,43 @@ pub struct LlmClient {
     base_url: String,
 }
 
+/// Tokens and cost of model calls, as reported by the provider.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct Usage {
+    pub calls: u64,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    /// Part of completion_tokens spent on hidden reasoning (when reported).
+    pub reasoning_tokens: u64,
+    /// USD, when the provider reports it (OpenRouter does).
+    pub cost_usd: f64,
+    pub latency_ms: u64,
+}
+
+impl Usage {
+    pub fn add(&mut self, o: &Usage) {
+        self.calls += o.calls;
+        self.prompt_tokens += o.prompt_tokens;
+        self.completion_tokens += o.completion_tokens;
+        self.reasoning_tokens += o.reasoning_tokens;
+        self.cost_usd += o.cost_usd;
+        self.latency_ms += o.latency_ms;
+    }
+
+    fn from_response(v: &serde_json::Value, latency_ms: u64) -> Self {
+        let u = &v["usage"];
+        let n = |x: &serde_json::Value| x.as_u64().unwrap_or(0);
+        Usage {
+            calls: 1,
+            prompt_tokens: n(&u["prompt_tokens"]),
+            completion_tokens: n(&u["completion_tokens"]),
+            reasoning_tokens: n(&u["completion_tokens_details"]["reasoning_tokens"]),
+            cost_usd: u["cost"].as_f64().unwrap_or(0.0),
+            latency_ms,
+        }
+    }
+}
+
 #[derive(Deserialize, Serialize, Debug)]
 struct RawStep {
     op: String,
@@ -98,15 +135,17 @@ impl LlmClient {
     /// One chat completion. With `schema`, the reply is constrained JSON and parsed;
     /// without, the raw text is returned as a JSON string.
     pub async fn chat(&self, messages: Vec<serde_json::Value>, schema: Option<(&str, serde_json::Value)>) -> Result<serde_json::Value> {
-        self.chat_with(false, messages, schema).await
+        Ok(self.chat_metered(false, messages, schema).await?.0)
     }
 
-    /// Same as `chat`, on the fast interaction model.
-    pub async fn chat_fast(&self, messages: Vec<serde_json::Value>, schema: Option<(&str, serde_json::Value)>) -> Result<serde_json::Value> {
-        self.chat_with(true, messages, schema).await
+    /// One chat completion plus the tokens/cost it used. `fast` picks the
+    /// interaction model, otherwise the background model.
+    pub async fn chat_metered(&self, fast: bool, messages: Vec<serde_json::Value>, schema: Option<(&str, serde_json::Value)>) -> Result<(serde_json::Value, Usage)> {
+        self.chat_with(fast, messages, schema).await
     }
 
-    async fn chat_with(&self, fast: bool, messages: Vec<serde_json::Value>, schema: Option<(&str, serde_json::Value)>) -> Result<serde_json::Value> {
+    async fn chat_with(&self, fast: bool, messages: Vec<serde_json::Value>, schema: Option<(&str, serde_json::Value)>) -> Result<(serde_json::Value, Usage)> {
+        let started = std::time::Instant::now();
         let (model, effort) = if fast { (&self.fast_model, &self.fast_reasoning_effort) } else { (&self.model, &self.reasoning_effort) };
         let mut body = json!({ "model": model, "messages": messages });
         if let Some((name, schema)) = schema {
@@ -129,6 +168,8 @@ impl LlmClient {
                 if body.get("response_format").is_some() {
                     body["provider"] = json!({ "require_parameters": true });
                 }
+                // Ask OpenRouter to report the cost of each call.
+                body["usage"] = json!({ "include": true });
             }
         }
         let provider = self.provider.name();
@@ -173,16 +214,18 @@ impl LlmClient {
         if let Some(err) = parsed.get("error") {
             return Err(anyhow!("{provider} error: {err}"));
         }
+        let usage = Usage::from_response(&parsed, started.elapsed().as_millis() as u64);
         let content = parsed["choices"][0]["message"]["content"]
             .as_str()
             .ok_or_else(|| anyhow!("{provider} response missing content: {text}"))?;
-        if body.get("response_format").is_some() {
+        let value = if body.get("response_format").is_some() {
             // Some models wrap JSON in a code fence even under a schema.
             let trimmed = content.trim().trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```").trim();
-            serde_json::from_str(trimmed).context("model output did not match schema")
+            serde_json::from_str(trimmed).context("model output did not match schema")?
         } else {
-            Ok(serde_json::Value::String(content.to_string()))
-        }
+            serde_json::Value::String(content.to_string())
+        };
+        Ok((value, usage))
     }
 
     /// Transcribe a PDF or image into plain text so it can be used as context.
@@ -332,6 +375,20 @@ fn convert_step(raw: RawStep) -> Option<Step> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_from_openrouter_response() {
+        let v = serde_json::json!({"usage": {"prompt_tokens": 1200, "completion_tokens": 300,
+            "completion_tokens_details": {"reasoning_tokens": 180}, "cost": 0.000063}});
+        let u = Usage::from_response(&v, 900);
+        assert_eq!((u.calls, u.prompt_tokens, u.completion_tokens, u.reasoning_tokens, u.latency_ms), (1, 1200, 300, 180, 900));
+        assert!((u.cost_usd - 0.000063).abs() < 1e-12);
+        let mut total = Usage::default();
+        total.add(&u);
+        total.add(&u);
+        assert_eq!(total.prompt_tokens, 2400);
+        assert_eq!(Usage::from_response(&serde_json::json!({}), 5).prompt_tokens, 0);
+    }
 
     #[test]
     fn reads_suggested_wait() {

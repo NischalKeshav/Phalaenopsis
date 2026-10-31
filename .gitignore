@@ -3,3 +3,7 @@
 data/
 *.pem
 *.crx
+
+# eval harness: downloaded test sites and run output
+eval/sites/
+eval/results/

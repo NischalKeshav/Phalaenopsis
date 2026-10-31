@@ -15,6 +15,7 @@
 
 use crate::controller::{MemoryController, RankedScript, generalize};
 use crate::fingerprint::{normalize_url, site_of};
+use crate::llm::Usage;
 use crate::model::*;
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
@@ -117,6 +118,8 @@ pub struct AgentSession {
     pub last_delegate_turn: Option<usize>,
     /// Consecutive micro-turns where the model said "working" but did nothing.
     pub idle_turns: usize,
+    /// Fields the person edited during this session (selector -> latest edit).
+    pub user_edits: BTreeMap<String, UserEdit>,
 }
 
 /// Something the page did while actions ran, as perceived by the executor.
@@ -162,6 +165,8 @@ pub struct AgentStepResponse {
     pub plan: Option<Plan>,
     /// What the background model is doing right now, if anything.
     pub background: Option<String>,
+    /// Tokens and cost so far in this session, per role.
+    pub usage: UsageSplit,
 }
 
 // ---------- background model state ----------
@@ -241,6 +246,22 @@ pub struct Background {
     /// Description of the job in flight, if any.
     pub running: Option<String>,
     pub planning_failed: bool,
+    /// Tokens and cost spent by each role in this session.
+    pub usage: UsageSplit,
+}
+
+#[derive(Serialize, Clone, Debug, Default)]
+pub struct UsageSplit {
+    pub interaction: Usage,
+    pub background: Usage,
+}
+
+impl UsageSplit {
+    pub fn total(&self) -> Usage {
+        let mut t = self.interaction.clone();
+        t.add(&self.background);
+        t
+    }
 }
 
 pub type BackgroundMap = std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Background>>>;
@@ -317,6 +338,8 @@ stop and ask the user, leaving that item unsaved. \
 delegate: a short question for the background model, or \"\" (the usual case). Delegate only when a required value is absent from the plan and notes \
 (e.g. whether an exam was taken), when no option fits a plan value, or when you are stuck; keep acting on other items meanwhile. \
 Ask the user only if the background model says the documents do not contain the answer. \
+person_edited lists fields the person changed themselves while you worked. Their edits win: never overwrite them unless the request says to, \
+and mention them in your final message (e.g. 'You changed Username to ...; I left it'). \
 Never invent data. Do not click the final submit of an application, pay, sign, or delete anything; saving a row or dialog is fine. \
 state: working while anything in the request remains to do (even if this turn only waits for the background model or needs data from it); \
 finished only when every plan item for the latest request is done or skipped and the page shows it; need_user when only the user can unblock you. \
@@ -332,6 +355,7 @@ options when visible; otherwise natural names such as subject category, year tak
 Normalize values to how forms usually phrase them and include the source phrasing when helpful (e.g. year taken = '9th' for 'Grade 9'). \
 Record every fact the documents give for each item, even ones the current page does not ask for yet, because later dialogs often \
 reveal more questions (e.g. 'AP exam score' -> '5', 'AP exam taken' -> 'Yes' when a score is listed, original grade text '5 / A'). \
+Copy names exactly as the documents spell them (e.g. class name 'English 9 Honors', never shortened to 'English 9'). \
 Keep the original wording alongside normalized values when they differ. If an AP/IB class has no exam score listed, record 'AP exam taken' -> 'unknown'. \
 If existing_plan is present, the user has made a new or follow-up request: output only the NEW items that request needs \
 (not items already in existing_plan); earlier_requests is background. \
@@ -482,7 +506,11 @@ fn page_view(page: &AgentPage) -> serde_json::Value {
         })
         .collect();
     let text: String = page.text.chars().take(MAX_PAGE_TEXT).collect();
-    json!({"url": page.url, "title": page.title, "new_text": page.new_text, "fields": fields, "actions": page.actions, "text": text})
+    let mut v = json!({"url": page.url, "title": page.title, "new_text": page.new_text, "fields": fields, "actions": page.actions, "text": text});
+    if !page.user_edits.is_empty() {
+        v["user_edits"] = json!(page.user_edits);
+    }
+    v
 }
 
 fn history_view(turns: &[Turn]) -> serde_json::Value {
@@ -599,27 +627,26 @@ impl MemoryController {
         }
         tokio::spawn(async move {
             let started = std::time::Instant::now();
-            let outcome = match &question {
-                None => llm
-                    .chat(
-                        vec![json!({"role": "system", "content": PLANNER}), json!({"role": "user", "content": context.to_string()})],
-                        Some(("plan", plan_schema())),
-                    )
-                    .await
-                    .and_then(|v| Ok(serde_json::from_value::<RawPlan>(v)?))
-                    .map(Ok),
-                Some(_) => llm
-                    .chat(
-                        vec![json!({"role": "system", "content": CONSULT}), json!({"role": "user", "content": context.to_string()})],
-                        Some(("consult", consult_schema())),
-                    )
-                    .await
-                    .and_then(|v| Ok(serde_json::from_value::<RawConsult>(v)?))
-                    .map(Err),
+            let (system, name, schema) = match &question {
+                None => (PLANNER, "plan", plan_schema()),
+                Some(_) => (CONSULT, "consult", consult_schema()),
             };
+            let reply = llm
+                .chat_metered(false, vec![json!({"role": "system", "content": system}), json!({"role": "user", "content": context.to_string()})], Some((name, schema)))
+                .await;
             let mut g = map.lock().unwrap();
             let slot = g.entry(sid.clone()).or_default();
             slot.running = None;
+            let outcome = match reply {
+                Ok((v, usage)) => {
+                    slot.usage.background.add(&usage);
+                    match &question {
+                        None => serde_json::from_value::<RawPlan>(v).map(Ok).map_err(anyhow::Error::from),
+                        Some(_) => serde_json::from_value::<RawConsult>(v).map(Err).map_err(anyhow::Error::from),
+                    }
+                }
+                Err(e) => Err(e),
+            };
             match outcome {
                 Ok(Ok(raw)) => {
                     let n = raw.items.len();
@@ -685,6 +712,7 @@ impl MemoryController {
                     known_selectors: HashSet::new(),
                     last_delegate_turn: None,
                     idle_turns: 0,
+                    user_edits: BTreeMap::new(),
                 }
             }
         };
@@ -709,6 +737,9 @@ impl MemoryController {
         let (url_key, observation_id) = self.page_node(&mut session, &req.page).await?;
         for f in &req.page.fields {
             session.known_selectors.insert(f.sig.selector.clone());
+        }
+        for e in &req.page.user_edits {
+            session.user_edits.insert(e.selector.clone(), e.clone());
         }
         for a in &req.page.actions {
             session.known_selectors.insert(a.selector.clone());
@@ -764,6 +795,7 @@ The background model has been asked for help; fix what new_text and missing/erro
         // background model is still working, wait for that result and ask once more.
         let mut raw: RawReply;
         let mut attempt = 0;
+        let mut finish_challenge: Option<String> = None;
         loop {
             attempt += 1;
             let bg = self.bg(&session.id);
@@ -780,6 +812,12 @@ The background model has been asked for help; fix what new_text and missing/erro
                 "interrupted": req.interrupted,
                 "history": history_view(&session.turns),
             });
+            if !session.user_edits.is_empty() {
+                user["person_edited"] = json!(session.user_edits.values().collect::<Vec<_>>());
+            }
+            if let Some(w) = &finish_challenge {
+                user["finish_check"] = json!(w);
+            }
             // Without a plan (planning failed), fall back to reading the documents directly.
             if bg.plan.is_none() && bg.planning_failed {
                 user["documents"] = context_view(&docs);
@@ -787,12 +825,14 @@ The background model has been asked for help; fix what new_text and missing/erro
             if let Some(w) = &stuck_warning {
                 user["warning"] = json!(w);
             }
-            let reply = llm
-                .chat_fast(
+            let (reply, usage) = llm
+                .chat_metered(
+                    true,
                     vec![json!({"role": "system", "content": SYSTEM}), json!({"role": "user", "content": user.to_string()})],
                     Some(("micro_turn", reply_schema())),
                 )
                 .await?;
+            self.background.lock().unwrap().entry(session.id.clone()).or_default().usage.interaction.add(&usage);
             raw = serde_json::from_value(reply)?;
             session.notes_seen = bg.notes.len();
             if !raw.item_updates.is_empty() {
@@ -808,6 +848,17 @@ The background model has been asked for help; fix what new_text and missing/erro
                 session.last_delegate_turn = Some(turn_no);
             }
             let busy = self.bg(&session.id).running.is_some();
+            // Finish guard: "finished" while plan items are still open is usually a
+            // false completion. Make the model look once more before accepting it.
+            let unfinished = self.unfinished_items(&session.id);
+            if raw.actions.is_empty() && raw.state == "finished" && !unfinished.is_empty() && finish_challenge.is_none() && attempt <= 2 {
+                finish_challenge = Some(format!(
+                    "You said finished, but these plan items are not marked done or skipped: {}. Check the page text for each one. \
+If it is on the page, mark it done; if it is missing or wrong, enter it now; if it cannot be entered, mark it skipped with a note.",
+                    unfinished.join("; ")
+                ));
+                continue;
+            }
             if raw.actions.is_empty() && attempt == 1 && (busy || raw.state == "working") {
                 if !busy {
                     // "Working" with nothing to do: it lacks something. Ask the background model.
@@ -849,6 +900,10 @@ The background model has been asked for help; fix what new_text and missing/erro
         session.idle_turns = if idle && raw.state == "working" { session.idle_turns + 1 } else { 0 };
         let stalled = session.idle_turns >= MAX_IDLE_TURNS;
         let mut message = raw.message.clone();
+        let still_open = self.unfinished_items(&session.id);
+        if idle && raw.state == "finished" && !still_open.is_empty() {
+            message = format!("{message} Not confirmed on the page: {}.", still_open.join(", "));
+        }
         if stalled {
             message = format!("{message} I'm not making progress on my own; tell me what to do next or give me the missing information.");
         }
@@ -867,11 +922,18 @@ The background model has been asked for help; fix what new_text and missing/erro
         });
         session.last_turn_at = Utc::now();
         let saved = if done { self.save_session(&mut session).await? } else { Vec::new() };
+        if done {
+            let t = self.bg(&session.id).usage.total();
+            tracing::info!(
+                "session {} finished: {} micro-turns, {} model calls, {} prompt + {} completion tokens, ${:.5}",
+                session.id, session.turns.len(), t.calls, t.prompt_tokens, t.completion_tokens, t.cost_usd
+            );
+        }
         let id = session.id.clone();
         let turn = session.turns.len();
         self.put_session(session);
         let bg = self.bg(&id);
-        Ok(AgentStepResponse { session_id: id, observation_id, turn, message, actions, done, saved, plan: bg.plan, background: bg.running })
+        Ok(AgentStepResponse { session_id: id, observation_id, turn, message, actions, done, saved, plan: bg.plan, background: bg.running, usage: bg.usage })
     }
 
     async fn finish_early(&self, mut session: AgentSession, observation_id: String, message: String) -> Result<AgentStepResponse> {
@@ -879,7 +941,15 @@ The background model has been asked for help; fix what new_text and missing/erro
         let bg = self.bg(&session.id);
         let (session_id, turn) = (session.id.clone(), session.turns.len());
         self.put_session(session);
-        Ok(AgentStepResponse { session_id, observation_id, turn, message, actions: vec![], done: true, saved, plan: bg.plan, background: None })
+        Ok(AgentStepResponse { session_id, observation_id, turn, message, actions: vec![], done: true, saved, plan: bg.plan, background: None, usage: bg.usage })
+    }
+
+    /// Titles of plan items still pending or in progress.
+    fn unfinished_items(&self, session_id: &str) -> Vec<String> {
+        self.bg(session_id)
+            .plan
+            .map(|p| p.items.iter().filter(|i| i.status == "pending" || i.status == "doing").map(|i| i.title.clone()).collect())
+            .unwrap_or_default()
     }
 
     fn consult_context(&self, session: &AgentSession, docs: &[ContextDoc], profile: &Profile, page: &AgentPage) -> serde_json::Value {
@@ -1108,6 +1178,7 @@ mod tests {
             known_selectors: HashSet::new(),
             last_delegate_turn: None,
             idle_turns: 0,
+            user_edits: BTreeMap::new(),
         };
         c.put_session(session);
         let saved = c.agent_finish("s1", vec![ok()]).await.unwrap();

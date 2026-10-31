@@ -233,6 +233,18 @@ pub struct AgentPage {
     /// (validation popups, "saved" banners).
     #[serde(default)]
     pub new_text: Vec<String>,
+    /// Fields the person changed themselves since the previous snapshot.
+    #[serde(default)]
+    pub user_edits: Vec<UserEdit>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct UserEdit {
+    pub selector: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub value: String,
 }
 
 impl AgentPage {

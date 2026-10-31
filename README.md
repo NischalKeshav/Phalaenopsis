@@ -38,6 +38,17 @@ as the other party instead of a person:
   the agent stops and asks you.
 - **Loop guard.** Repeating the same actions on an unchanged page consults the background model
   after 2 turns and stops after 4.
+- **Virtual cursor.** Before each action an orange cursor glides to the element, outlines it and
+  labels what is about to happen ("Type … · E-mail"), with a ripple on clicks
+  (`autofill_extension/shared/cursor.js`). The page cannot see or click it.
+- **Token metering.** Every model call records prompt, completion and reasoning tokens and cost;
+  the side panel's plan card shows the running total, and `/v1/agent/step` returns it per role.
+
+## Evaluating
+
+`eval/` runs the real extension code on real forms from public repos (MDN, jquery-validation,
+Bootstrap) plus the MIT-style replica, with and without a simulated person using the page at the
+same time, and reports pass/fail, micro-turns, tokens and cost. See `eval/README.md`.
 
 ## Graph model
 
@@ -143,4 +154,5 @@ cargo test typedb_live -- --ignored          # every TypeQL query against a live
 - `src/agent.rs` interactive agent sessions and saving their traces into the graph
 - `src/llm.rs` OpenAI calls (agent turns, cold-start scripts, PDF/image transcription) · `src/api.rs` axum routes
 - `autofill_extension/` MV3 extension: `sidepanel.*` (UI and agent loop), `content.js` (page snapshot and executor),
-  `shared/fingerprint.js`, `background.js` (observe, replay, record), `test/`
+  `shared/fingerprint.js`, `shared/cursor.js` (virtual cursor), `shared/netwatch.js`, `background.js` (observe, replay, record), `test/`
+- `eval/` harness: `run.mjs`, `scenarios.mjs`, `fetch-sites.sh`
